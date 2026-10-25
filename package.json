@@ -1,0 +1,15 @@
+{
+  "name": "qqbridge-dot-backend",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Experimental lifecycle core and integration design for using a ChatGPT Dot with QQBridge reserved2.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test --test-isolation=none",
+    "demo": "node examples/offline-demo.mjs"
+  }
+}

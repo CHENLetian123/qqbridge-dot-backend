@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "reviewed_at": "2026-10-25",
+  "status": "reviewed-only",
+  "compatibility_verified": false,
+  "patch_status": "not-implemented",
+  "patch_available": false,
+  "runtime_scope": "offline-lifecycle-prototype-only",
+  "upstream": {
+    "repository": "Derpyu520/qq-bridge",
+    "url": "https://github.com/Derpyu520/qq-bridge",
+    "commit": "a49877f4e58d04e47532d44b803360d0f001160d",
+    "commit_url": "https://github.com/Derpyu520/qq-bridge/commit/a49877f4e58d04e47532d44b803360d0f001160d",
+    "reviewed_mode": "reserved2"
+  },
+  "reviewed_files": [
+    {
+      "path": "src/bridge.js",
+      "blob_sha": "934006821ec3d85b86b59435169717f88921a9e8",
+      "url": "https://github.com/Derpyu520/qq-bridge/blob/a49877f4e58d04e47532d44b803360d0f001160d/src/bridge.js"
+    },
+    {
+      "path": "src/mcp-snowluma-safe.js",
+      "blob_sha": "ca8d390a66ad3cdad9d38d9f9fe2b8c5783b5c69",
+      "url": "https://github.com/Derpyu520/qq-bridge/blob/a49877f4e58d04e47532d44b803360d0f001160d/src/mcp-snowluma-safe.js"
+    }
+  ],
+  "integration": {
+    "qqbridge_adapter": "not-implemented",
+    "remote_mcp": "not-implemented",
+    "mcp_events": "not-implemented",
+    "live_qq_dot_verification": "not-performed"
+  },
+  "notes": [
+    "源码审阅不代表运行兼容；当前没有可应用的 QQBridge 补丁。",
+    "本基线不声明支持任何其他 commit 或发行版。",
+    "文件 blob SHA 与仓库 commit 是不同标识。",
+    "源码行号仅供定位，不能作为补丁或兼容性校验依据。"
+  ]
+}
