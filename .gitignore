@@ -7,4 +7,5 @@ runtime/
 logs/
 *.log
 coverage/
+upstream/
 .DS_Store

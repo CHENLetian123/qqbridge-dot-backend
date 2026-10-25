@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline:
+    name: Node 24 offline tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Run unit and installer tests
+        run: npm test
+      - name: Run offline lifecycle demo
+        run: npm run demo
+
+  qqbridge-integration:
+    name: Pinned QQBridge adapter integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      QQBRIDGE_SOURCE_DIR: ${{ github.workspace }}/upstream
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check out pinned upstream source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Derpyu520/qq-bridge
+          ref: a49877f4e58d04e47532d44b803360d0f001160d
+          path: upstream
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Validate baseline and patch without modifying upstream
+        run: node scripts/apply-qqbridge-patch.mjs --source "$QQBRIDGE_SOURCE_DIR" --check
+      - name: Apply the QQBridge adapter
+        run: node scripts/apply-qqbridge-patch.mjs --source "$QQBRIDGE_SOURCE_DIR"
+      - name: Verify repeat application
+        run: node scripts/apply-qqbridge-patch.mjs --source "$QQBRIDGE_SOURCE_DIR"
+      # The integration harness mocks external SDK/DSH dependencies, not bridge.js or local modules.
+      # Missing upstream source is an error; test:integration must not silently skip.
+      - name: Exercise the patched upstream HTTP routes and lifecycle
+        run: npm run test:integration

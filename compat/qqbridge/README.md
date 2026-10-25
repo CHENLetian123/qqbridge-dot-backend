@@ -2,13 +2,17 @@
 
 ## 当前状态
 
-**状态：`reviewed-only`，未验证运行兼容。目前没有可应用的 QQBridge patch。** 本目录记录源码基线、必要适配边界和验收条件，不是安装完成说明。
+**状态：实验性适配已实现，提供固定基线补丁和安装器。组件测试运行真实桥接程序，外部 QQ / DSH 使用本机替身；真实 QQ / Dot 兼容性仍未验证。**
 
 - 检查日期：2026-10-25
 - 上游：[`Derpyu520/qq-bridge`](https://github.com/Derpyu520/qq-bridge)
 - 固定 commit：[`a49877f4e58d04e47532d44b803360d0f001160d`](https://github.com/Derpyu520/qq-bridge/tree/a49877f4e58d04e47532d44b803360d0f001160d)
 - 机器可读记录：[baseline.json](./baseline.json)
-- 本项目当前仅有离线生命周期原型；真实 MCP/Events、上游适配补丁、真实 QQ/Dot 联调尚未实现。
+- 补丁：[qqbridge-dot.patch](qqbridge-dot.patch)
+- 随补丁安装的模块：[overlay/src/dot-backend.mjs](overlay/src/dot-backend.mjs)
+- 安装步骤：[本地联调](../../docs/local-integration.md)
+- 实际接口：[本地 API v1](../../docs/local-api.md)
+- 真实 MCP/Events、运行账本持久化及真实 QQ/Dot 联调尚未完成。
 
 本记录不表示支持该 commit 之前或之后的任何发行版。更换上游版本必须重新检查边界并运行集成验证；文件 blob SHA 不能用作仓库 commit。
 
@@ -20,7 +24,7 @@
 
 回发接口可复用现有业务规则，但它们要求会话 token、`reserved2`、白名单、启用状态和限频。已检查的发送校验没有“必须存在活跃 DSH turn”这一硬要求；实际耦合主要在会话 policy、mapping 和生命周期管理。
 
-## 必要适配点
+## 补丁覆盖的边界
 
 | 边界 | 必须完成的改动 |
 |---|---|
@@ -32,7 +36,11 @@
 | 观察与潜水 | 让本地计时器继续观察，在满足条件后安排潜水或下一次唤醒；不得直接删除观察门 |
 | 出站动作 | 沿用发送检查和记录，增加运行/发送幂等键；支持不发消息的正常完成 |
 
-以上是拟定的适配要求，不是上游已提供的扩展 API。正式补丁应锁定 commit、在基线不匹配时停止应用，并保留 DSH 原有路径。
+这些接口由本补丁提供，不是原版上游已有的扩展 API。安装器锁定 commit 与原文件 SHA，在基线不匹配时停止应用。会话归属采用静态配置，进程重启后生效；首版只开放纯文本读取、发送与收尾，观察后沿用已有唤醒配置，不开放任意 wake-config 修改。
+
+旧 DSH 工具面不能用当前或旧 agent token 访问 Dot 会话；只有内部固定发送代理携带有效运行身份时可以复用原发送路由。模式切换、暂停、会话重置和权限变化撤销旧运行，恢复时重新安排被中断的工作。固定管理命令回执仍保留原模式与白名单限制。
+
+源码补丁涉及的原始许可见 [UPSTREAM-LICENSE](UPSTREAM-LICENSE)。本项目未分发 SnowLuma 源码或二进制。
 
 ## 源码定位
 

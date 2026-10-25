@@ -1,0 +1,786 @@
+diff --git a/src/bridge.js b/src/bridge.js
+--- a/src/bridge.js
++++ b/src/bridge.js
+@@ -29,6 +29,7 @@
+ import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
+ import { resolvePriceTable } from './model-prices.js';
+ import { createTokenLedger } from './token-ledger.js';
++import { createDotBackend } from './dot-backend.mjs';
+ import {
+   loadSlang,
+   saveSlang,
+@@ -656,6 +657,8 @@
+   const file = readJsonSafe(p, null, true);
+   if (!file || typeof file !== 'object' || Array.isArray(file)) throw new Error(`配置格式错误：${p}`);
+   const cfg = {
++    // Dot ownership is static for this process; it never falls back to DSH.
++    dot: { enabled: false, conversations: [], tokenFile: 'state/dot-api-token', leaseMs: 120000, ...(file.dot ?? {}) },
+     dsh: {
+       baseUrl: 'http://127.0.0.1:3080',
+       provider: 'deepseek-official',
+@@ -1384,6 +1387,19 @@
+ // ── 主流程 ──────────────────────────────────────────────────────────────────
+ async function main() {
+   const cfg = loadConfig();
++  const dotEpoch = crypto.randomUUID();
++  const dotConversationKeys = new Set((Array.isArray(cfg.dot.conversations) ? cfg.dot.conversations : [])
++    .map((key) => canonicalV2Key(key)).filter(Boolean));
++  const isDotConversation = (key) => cfg.dot.enabled === true && dotConversationKeys.has(canonicalV2Key(key));
++  let dot = null;
++  let invokeDotSend = null;
++  let dotToken = '';
++  if (cfg.dot.enabled === true) {
++    const tokenPath = path.resolve(ROOT, String(cfg.dot.tokenFile || 'state/dot-api-token'));
++    try { dotToken = fs.readFileSync(tokenPath, 'utf8').trim(); }
++    catch { throw new Error(`Dot 已启用，但无法读取专用 token 文件：${tokenPath}`); }
++    if (dotToken.length < 32) throw new Error('Dot 专用 token 至少需要 32 个字符；不会自动生成或复用控制台凭据');
++  }
+   fs.mkdirSync(STATE_DIR, { recursive: true });
+   hardenStateDirAcl();
+   acquireLock();
+@@ -2422,7 +2438,9 @@
+   const reverse = new Map(); // sessionId -> conv key
+   for (const [key, sessionId] of Object.entries(state.sessions)) reverse.set(sessionId, key);
+   // 新版 DSH 事件流需要显式 follow；启动时为已持久化的 QQ 会话补上。
+-  for (const sessionId of Object.values(state.sessions)) api.events.follow(sessionId);
++  for (const [key, sessionId] of Object.entries(state.sessions)) {
++    if (!isDotConversation(key)) api.events.follow(sessionId);
++  }
+   const sessionPromises = new Map(); // key -> create promise（防并发重复创建）
+   const promptQueues = new Map(); // key -> { queue: [], running: false }：每个 QQ 会话串行投递 DSH prompt，保证 turn 顺序
+ 
+@@ -2563,7 +2581,10 @@
+   let dshReady = false;
+   let dshCheckStarted = false;
+   let snowlumaWatchStarted = false; // SnowLuma 上游健康探测只启动一次（见 startSnowlumaWatch）
+-  let currentMode = 'chat'; // chat | closed-agent | reserved（仿真模式，由 DSH settings / state/mode.json 驱动）
++  // Dot must not depend on a successful DSH probe to recover reserved2 mode.
++  let currentMode = cfg.dot.enabled === true
++    ? (normalizeModeInput(readJsonSafe(path.join(STATE_DIR, 'mode.json'), null)?.mode) || 'chat')
++    : 'chat'; // chat | closed-agent | reserved | reserved2
+   let lastMode = currentMode;
+   // closed-agent 模式使用的 DSH agent preset：留空表示「用 DSH 自己声明的默认 preset」。
+   // 旧版本这里硬编码 'router-standard'，但 DSH 0.1.5 已移除该 preset，硬编码会导致
+@@ -2716,10 +2737,12 @@
+   }
+ 
+   function sessionPolicy(key) {
++    if (isDotConversation(key)) return JSON.stringify([currentMode, 'dot', dotEpoch]);
+     return JSON.stringify([currentMode, modePreset(key, currentMode, cfg) ?? '', currentMode === 'closed-agent' ? cfg.ownerQQ : null]);
+   }
+ 
+   function isCurrentSession(key, sessionId) {
++    if (isDotConversation(key)) return false; // late DSH events never own a Dot conversation
+     return isSessionAllowedInCurrentMode(key) && state.sessions[key] === sessionId
+       && state.sessionPolicies[key] === sessionPolicy(key);
+   }
+@@ -2749,6 +2772,7 @@
+    * 限流时间戳会一直留在内存里。所有撤销会话映射的路径都必须调用这里。
+    */
+   function forgetConversationCaches(key) {
++    if (isDotConversation(key)) dot?.invalidate(key, 'conversation-invalidated');
+     lastSendFailed.delete(key);
+     activeWaits.delete(key);
+     queuedHintAt.delete(key);
+@@ -2803,6 +2827,12 @@
+   }
+ 
+   function reconcileSessionPolicies() {
++    for (const key of dotConversationKeys) {
++      if (isDotConversation(key) && (currentMode !== 'reserved2' || socialV2.paused
++          || cfg.socialV2?.enabled === false || !isSessionAllowedInCurrentMode(key))) {
++        dot?.invalidate(key, 'conversation-policy-changed');
++      }
++    }
+     // DSH preset 清单未知时**绝不能**做退役判定。
+     //
+     // 为什么：`sessionPolicy()` 包含 `modePreset()` 的结果，而 `modePreset()` 依赖
+@@ -2830,6 +2860,7 @@
+       const entries = [...queued.entries()];
+       queued.clear();
+       for (const [key, items] of entries) {
++        if (isDotConversation(key)) continue; // do not replay pre-takeover DSH prompts
+         let sent = 0;
+         let failed = 0;
+         for (let i = 0; i < items.length; i++) {
+@@ -2911,6 +2942,7 @@
+             setupSleepTimerV2(key);
+             scheduleProactiveCheckV2(key);
+           }
++          resumeDotConversations();
+           log('桥接模式已确定为 reserved2，恢复有限睡眠定时器');
+         }
+         try { await flushQueue(); } catch (error) { log('补投队列异常:', error?.message ?? error); }
+@@ -2931,6 +2963,7 @@
+             setupSleepTimerV2(key);
+             scheduleProactiveCheckV2(key);
+           }
++          resumeDotConversations();
+           log('桥接模式已进入二代仿真模式，重建有限睡眠定时器');
+         }
+         log(`桥接模式已切换为: ${currentMode}`);
+@@ -3259,6 +3292,12 @@
+         sendJson({ ok: false, error: `Host 头不被允许（${hostHeader || '缺失'}）：控制台只接受本机回环访问` }, 403);
+         return;
+       }
++      // Separate namespace and Bearer credential. Never grant this token console access.
++      if (url.pathname.startsWith('/api/dot/v1/')) {
++        try { await dot.handleHttp({ req, res, url, readBody, sendJson, boundPort }); }
++        catch (error) { sendJson({ ok: false, error: error?.message || 'Dot 请求失败' }, Number(error?.statusCode) || 500); }
++        return;
++      }
+       // 控制台鉴权：所有请求需带 x-console-token 或 ?token=
+       // 定长比较：`!==` 会在第一个不同的字符处短路，理论上可被本机进程用响应时延逐字节试探。
+       // 令牌是 192 bit 随机值且只监听回环，所以这是纵深防御而非在野漏洞。
+@@ -3278,6 +3317,23 @@
+           sendJson({ ok: false, error: '未授权：请提供控制台访问令牌' }, 401);
+         }
+         return;
++      }
++      // Dot's persisted legacy token exists only for the fixed internal send
++      // operation. It must not authorize any legacy read/ack/mutation endpoint,
++      // even when x-agent-call is omitted by a caller holding console access.
++      const dotAgentKey = typeof req.headers['x-agent-token'] === 'string'
++        ? [...socialV2.conversations.entries()].find(([key, st]) => isDotConversation(key) && tokenEq(req.headers['x-agent-token'], st?.agentToken))?.[0]
++        : null;
++      if (dotAgentKey) {
++        if (req.method !== 'POST' || url.pathname !== '/api/socialV2/send-message') {
++          sendJson({ ok: false, error: 'Dot 会话必须通过带有效 run token 的 Dot 接口操作' }, 403);
++          return;
++        }
++        try { dot.assertRun(dotAgentKey, req.headers['x-dot-run-id'], req.headers['x-dot-run-token']); }
++        catch (error) {
++          sendJson({ ok: false, error: error?.message || 'Dot run 身份无效' }, Number(error?.statusCode) || 403);
++          return;
++        }
+       }
+       // 智能体调用隔离（集中关卡）。
+       //
+@@ -3509,6 +3565,7 @@
+               setupSleepTimerV2(key);
+               scheduleProactiveCheckV2(key);
+             }
++            resumeDotConversations();
+             log('控制台：模式进入二代仿真模式，重建有限睡眠定时器');
+           }
+           log(`控制台：模式已设置为 ${requestedMode}${next.closedAgentPreset ? `（closed-agent preset: ${next.closedAgentPreset}）` : ''}${dshSynced ? '' : ' [仅本地，DSH 未同步]'}`);
+@@ -4071,6 +4128,7 @@
+           cfg.deny = { private: deny.private, groups: deny.groups };
+           cfg.ownerQQ = ownerQQ;
+           reconcileSessionPolicies();
++          resumeDotConversations();
+           log(`控制台：白名单已更新（群: ${allow.groups.join(',') || '无'}，私聊: ${allow.private.join(',') || '无'}，管理员: ${ownerQQ ?? '未设置'}）`);
+           sendJson({ ok: true, allow, deny, ownerQQ });
+           return;
+@@ -4545,6 +4603,10 @@
+           file.socialV2 = merged;
+           atomicWriteJson(configFile, file);
+           cfg.socialV2 = { ...(cfg.socialV2 ?? {}), ...merged };
++          // Revocation must end existing runs; re-enabling a tool must not revive them.
++          if (body.enabled === false || (body.tools && ['getPrompt', 'getUnread', 'markRead', 'sendMessage'].some((name) => body.tools[name] === false))) {
++            for (const key of dotConversationKeys) if (isDotConversation(key)) dot.invalidate(key, 'social-v2-permission-revoked');
++          }
+           // 仅当“会影响默认唤醒配置”的字段变化时，才同步到仍使用默认配置的现有会话。
+           // 避免只改发送/等待/工具开关时，意外重置正在等待的潜水/唤醒计划。
+           const WAKE_DEFAULT_KEYS = [
+@@ -4557,6 +4619,9 @@
+           const wakeDefaultChanged = body.wake && typeof body.wake === 'object' &&
+             WAKE_DEFAULT_KEYS.some((k) => Object.prototype.hasOwnProperty.call(body.wake, k));
+           if (wakeDefaultChanged) refreshAllDefaultWakeConfigsV2();
++          if (body.enabled === true || (body.tools && ['getPrompt', 'getUnread', 'markRead', 'sendMessage'].some((name) => body.tools[name] === true))) {
++            resumeDotConversations();
++          }
+           log('控制台：二代仿真配置已更新');
+           sendJson({ ok: true, config: cfg.socialV2 });
+           return;
+@@ -4575,9 +4640,10 @@
+           } else {
+             log('控制台：二代 AI 已恢复');
+             for (const key of socialV2.conversations.keys()) {
+-            setupSleepTimerV2(key);
+-            scheduleProactiveCheckV2(key);
+-          }
++              setupSleepTimerV2(key);
++              scheduleProactiveCheckV2(key);
++            }
++            resumeDotConversations();
+           }
+           saveSocialV2State();
+           sendJson({ ok: true, paused: socialV2.paused });
+@@ -5199,6 +5265,13 @@
+         if (req.method === 'POST' && url.pathname === '/api/socialV2/send-message') {
+           const body = await readBody();
+           const key = String(body.key ?? '').trim();
++          // Bind before quote lookup: a later run cannot authorize an old send.
++          let dotRunGuard = null;
++          if (isDotConversation(key)) {
++            dot.assertRun(key, req.headers['x-dot-run-id'], req.headers['x-dot-run-token']);
++            assertDotConversationAllowed(key, 'send');
++            dotRunGuard = dot.captureSendGuard(key, req.headers['x-dot-run-id'], req.headers['x-dot-run-token']);
++          }
+           let rawMessages = body.messages;
+           if (typeof rawMessages === 'string') {
+             const trimmed = rawMessages.trim();
+@@ -5314,7 +5387,7 @@
+             actualReplyToMessageId = resolved.messageId;
+           }
+           try {
+-            const sentMessages = await sendMessagesV2(key, messages, delays, actualReplyToMessageId, atUserId);
++            const sentMessages = await sendMessagesV2(key, messages, delays, actualReplyToMessageId, atUserId, dotRunGuard);
+             recordSentMessagesV2(key, sentMessages);
+             st.lastAiReplyAt = now;
+             st.lastActionAt = now;
+@@ -5341,7 +5414,7 @@
+             }
+             if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
+             saveSocialV2State();
+-            sendJson({ ok: false, error: error?.message ?? String(error) }, 500);
++            sendJson({ ok: false, error: error?.message ?? String(error) }, Number(error?.statusCode) || 500);
+           }
+           return;
+         }
+@@ -7045,6 +7118,11 @@
+         if (req.method === 'POST' && url.pathname === '/api/session/reset') {
+           const body = await readBody();
+           const key = String(body.key ?? '');
++          if (isDotConversation(key)) {
++            resetDotConversation(key);
++            sendJson({ ok: true, key, backend: 'dot', archived: null });
++            return;
++          }
+           if (!key || !state.sessions[key]) { sendJson({ ok: false, error: '会话不存在' }, 404); return; }
+           sessionEpoch++;
+           const oldSessionId = state.sessions[key];
+@@ -7100,6 +7178,8 @@
+         }
+         if (req.method === 'POST' && url.pathname === '/api/workspace/reset') {
+           sessionEpoch++;
++          // Revoke immediately, before potentially slow DSH cleanup awaits.
++          for (const key of dotConversationKeys) if (isDotConversation(key)) dot.invalidate(key, 'workspace-reset');
+           let archivedCount = 0;
+           let stoppedCount = 0;
+           try {
+@@ -7184,6 +7264,29 @@
+         sendJson({ ok: false, error: error?.message ?? String(error) }, status);
+       }
+     });
++    // Fixed internal operation only. Credentials remain in this closure and never
++    // appear in Dot context or responses. The original route applies all QQ checks.
++    invokeDotSend = async (key, { text, replyToMessageId, runId, runToken }) => {
++      dot.assertRun(key, runId, runToken);
++      const address = server.address();
++      if (!address || typeof address === 'string') throw dotError('Dot 发送通道尚未就绪', 503);
++      const response = await fetch(`http://127.0.0.1:${address.port}/api/socialV2/send-message`, {
++        method: 'POST',
++        headers: {
++          'content-type': 'application/json',
++          'x-console-token': consoleToken,
++          'x-agent-call': '1',
++          'x-agent-token': getSocialV2State(key).agentToken,
++          'x-dot-run-id': String(runId),
++          'x-dot-run-token': String(runToken)
++        },
++        body: JSON.stringify({ key, messages: [text], ...(replyToMessageId == null ? {} : { replyToMessageId }) }),
++        signal: AbortSignal.timeout(60000)
++      });
++      const result = await response.json();
++      if (!response.ok || result?.ok !== true) throw dotError(result?.error || 'QQ 文本发送失败', response.status >= 400 ? response.status : 502);
++      return { sent: 1 };
++    };
+     server.listen(port, '127.0.0.1', () => {
+       log(`本地控制台已启动：http://127.0.0.1:${port}`);
+     });
+@@ -7220,8 +7323,8 @@
+   // 更新 lastAiReplyAt / 活跃调度，实际群里什么都没收到，而且只有一行滚动日志能看出问题。
+   const lastSendFailed = new Map(); // key -> true（下一次成功即清除）
+ 
+-  function sendToQQ(key, msg) {
+-    const assertSendAllowed = captureSendGuard(key);
++  function sendToQQ(key, msg, bridgeControl = false) {
++    const assertSendAllowed = captureSendGuard(key, null, bridgeControl);
+     const safeMsg = redactKnownTokensOnly(msg);
+     const [kind, id] = key.split(':');
+     const parts = splitForQQ(safeMsg);
+@@ -7990,8 +8093,8 @@
+     return delays;
+   }
+ 
+-  function sendMessagesV2(key, messages, delays, replyToMessageId, atUserId = null) {
+-    const assertSendAllowed = captureSendGuard(key);
++  function sendMessagesV2(key, messages, delays, replyToMessageId, atUserId = null, runGuard = null) {
++    const assertSendAllowed = captureSendGuard(key, runGuard);
+     const [kind, id] = key.split(':');
+     const sent = [];
+     const failed = [];
+@@ -7999,15 +8102,18 @@
+       const msg = messages[i];
+       const useReply = i === 0 ? replyToMessageId : null;
+       const useAt = i === 0 ? atUserId : null;
++      let dispatched = false;
+       sendChain = sendChain
+         .then(async () => {
+           assertSendAllowed();
++          dispatched = true;
+           await onebotSend(kind, id, msg, useReply, useAt);
+           sent.push(msg);
+         })
+         .catch((error) => {
+           log(`QQ 发送失败 (${key}):`, error?.message ?? error);
+-          failed.push(error);
++          // Once OneBot dispatch starts, even a 4xx-shaped exception is uncertain.
++          failed.push({ error, definitelyRejected: !dispatched && Number(error?.statusCode) >= 400 && Number(error?.statusCode) < 500 });
+         });
+       if (i < delays.length) {
+         const d = delays[i];
+@@ -8016,8 +8122,9 @@
+     }
+     return sendChain.then(() => {
+       if (failed.length > 0) {
+-        const err = new Error(`QQ 发送失败 ${failed.length}/${messages.length} 条：${failed[0]?.message ?? '未知错误'}`);
++        const err = new Error(`QQ 发送失败 ${failed.length}/${messages.length} 条：${failed[0]?.error?.message ?? '未知错误'}`);
+         err.sent = sent.slice();
++        if (sent.length === 0 && failed.every((failure) => failure.definitelyRejected)) err.statusCode = Number(failed[0].error.statusCode);
+         throw err;
+       }
+       return sent;
+@@ -8033,10 +8140,13 @@
+   }
+ 
+   // 入队校验无法约束排队等待期间的权限变化，每条消息临近实际发送时再次校验。
+-  function captureSendGuard(key) {
++  function captureSendGuard(key, runGuard = null, bridgeControl = false) {
+     const policy = sessionPolicy(key);
+     const sessionId = state.sessions[key];
++    const assertDotRun = isDotConversation(key) && !bridgeControl ? (runGuard || dot.captureSendGuard(key)) : null;
+     return () => {
++      if (assertDotRun) assertDotRun();
++      if (isDotConversation(key) && !bridgeControl) assertDotConversationAllowed(key, 'send');
+       if (!isSessionAllowedInCurrentMode(key) || policy !== sessionPolicy(key)
+           || (sessionId && state.sessions[key] !== sessionId)) {
+         throw new Error('发送已取消：会话、模式或白名单已变化');
+@@ -8101,6 +8211,7 @@
+   }
+ 
+   async function ensureSession(key) {
++    if (isDotConversation(key)) throw dotError('该会话由 Dot 接管，不能创建 DSH 会话', 409);
+     const epoch = sessionEpoch;
+     const policy = sessionPolicy(key);
+     if (!isSessionAllowedInCurrentMode(key)) throw new Error(`当前模式不允许会话 ${key}`);
+@@ -8904,6 +9015,211 @@
+   // 操作者预写的会话初始提示词（与控制台入口同样在 main() 里；损坏时只读降级，不阻塞启动）。
+   loadInitialPrompts();
+ 
++  // Dot adapter hooks deliberately expose operations, not the console or DSH client.
++  function dotError(message, statusCode = 403) {
++    const error = new Error(message);
++    error.statusCode = statusCode;
++    return error;
++  }
++
++  function assertDotConversationAllowed(key, action = 'wake') {
++    if (!isDotConversation(key)) throw dotError('该会话未分配给 Dot');
++    if (currentMode !== 'reserved2') throw dotError('Dot 仅支持 reserved2 模式');
++    if (cfg.socialV2?.enabled === false || socialV2.paused) throw dotError('二代 AI 已关闭或暂停');
++    if (!isSessionAllowedInCurrentMode(key)) throw dotError('目标不在当前模式允许范围内');
++    const tool = { context: 'getPrompt', read: 'getUnread', finish: 'markRead', ack: 'markRead', acknowledge: 'markRead', send: 'sendMessage' }[action];
++    if (tool && !v2ToolEnabled(tool)) throw dotError(`工具未启用：${tool}`);
++    if (action === 'send' && shouldBlockSilentReply(key)) throw dotError('静默模式已开启，当前不允许发送');
++  }
++
++  function resumeDotConversations() {
++    if (!dot) return;
++    for (const key of dotConversationKeys) {
++      if (!isDotConversation(key)) continue;
++      try { dot.resume(key); }
++      catch (error) { log(`[dot] 会话恢复暂缓 ${key}: ${error?.message || error}`); }
++    }
++  }
++
++  function dotReadState(key) {
++    const st = getSocialV2State(key);
++    return {
++      lastReadThroughSeq: Number(st.lastReadThroughSeq) || 0,
++      lastUnreadSeq: Number(st.lastUnreadSeq) || 0,
++      unreadSeqs: st.unread.map((message) => message.seq).filter((seq) => Number.isSafeInteger(seq) && seq > 0)
++    };
++  }
++
++  function resetDotConversation(key) {
++    dot.invalidate(key, 'conversation-reset');
++    clearSocialV2Timers(key);
++    cancelSocialTimers(key);
++    forgetConversationCaches(key);
++    const entry = pending.get(key);
++    if (entry) { clearTimeout(entry.timer); void cancelPendingEntry(entry).catch(() => {}); }
++    pending.delete(key);
++    queued.delete(key);
++    sessionPromises.delete(key);
++    drainPromptQueue(key, 'Dot 会话已重置');
++    social.recentMessages.delete(key);
++    social.pendingSummaries.delete(key);
++    social.states.delete(key);
++    social.silentContext.delete(key);
++    messageMediaStore.delete(key);
++    seenForwardIds.delete(key);
++    slangWindows.delete(key);
++    slangExtractionCooldowns.delete(key);
++    pendingWakeKeys.delete(key);
++    forgetAgentToken(key);
++    socialV2.conversations.delete(key);
++    delete state.sessions[key];
++    delete state.sessionPolicies[key];
++    saveState();
++    saveSocialV2State();
++  }
++
++  function inspectDotObservation(key) {
++    const st = getSocialV2State(key);
++    if (!preSleepWaitBlockedV2(st)) return { blocked: false, remainingMs: 0 };
++    const waitMs = Math.max(0, Number(cfg.socialV2?.wake?.preSleepWaitMs) || 300000);
++    // A bootstrap/admin wake without incoming messages still has a real wake time.
++    // No upstream satisfied/observed flag is fabricated by this adapter.
++    const anchor = Number(st.lastIncomingAt) || Number(st.wakeConfig?.lastWakeAt) || Date.now();
++    const remainingMs = Math.max(0, waitMs - Math.max(0, Date.now() - anchor));
++    return { blocked: remainingMs > 0, remainingMs };
++  }
++
++  dot = createDotBackend({
++    config: cfg.dot,
++    token: dotToken,
++    hooks: {
++      assertConversationAllowed: assertDotConversationAllowed,
++      buildContext(key, reason) {
++        assertDotConversationAllowed(key, 'context');
++        const st = getSocialV2State(key);
++        const rs = readRoleState();
++        return {
++          key,
++          reason,
++          time: new Date().toISOString(),
++          self: { nickname: selfDisplayName || null, userId: selfUserId || null },
++          role: { name: rs.role || null, prompt: currentRoleHintV2() },
++          environment: formatInitialPromptV2(key),
++          memory: formatMemoryV2(st),
++          participation: formatParticipationV2(st),
++          wakeConfig: JSON.parse(JSON.stringify(st.wakeConfig)),
++          observation: inspectDotObservation(key),
++          instructions: '先分页读取当前会话未读消息，再决定是否发一条纯文本。无需插话时可安静完成。finish 必须带已处理的连续 throughSeq；本地桥接负责后续观察。'
++        };
++      },
++      readUnread(key, afterSeq = 0, limit = 30) {
++        assertDotConversationAllowed(key, 'read');
++        if (!Number.isSafeInteger(afterSeq) || afterSeq < 0) throw dotError('afterSeq 必须为非负安全整数', 400);
++        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw dotError('limit 必须为 1–100 的整数', 400);
++        const st = getSocialV2State(key);
++        const page = st.unread.filter((message) => Number.isSafeInteger(message.seq) && message.seq > afterSeq).slice(0, limit);
++        noteModelMessagesV2(st, page); // visibility only; never acknowledgement
++        const messages = page.map((message) => ({
++          seq: message.seq,
++          messageId: message.messageId,
++          sender: message.sender,
++          userId: message.userId,
++          text: String(message.plain ?? message.text ?? ''),
++          ...(message.tail && message.tail !== message.plain ? { tail: message.tail } : {}),
++          time: message.time,
++          quoteTargetIsSelf: message.quoteTargetIsSelf === true
++        }));
++        return { messages, ...dotReadState(key) };
++      },
++      getReadState(key) {
++        assertDotConversationAllowed(key, 'read');
++        return dotReadState(key);
++      },
++      acknowledgeThrough(key, throughSeq) {
++        assertDotConversationAllowed(key, 'finish');
++        const st = getSocialV2State(key);
++        if (!Number.isSafeInteger(throughSeq)) throw dotError('finish 必须提供 throughSeq', 400);
++        const checked = requestedReadThroughSeqV2(st, { throughSeq }, true);
++        const markedCount = acknowledgeMessagesV2(st, checked);
++        st.lastActionAt = Date.now();
++        st.wakeConfig.noActionCount = 0;
++        st.wakeConfig.confirmedAt = Date.now();
++        st.wakeConfig.confirmedBy = 'dot_finish';
++        saveSocialV2State();
++        return { markedCount, ...dotReadState(key) };
++      },
++      async sendText(key, request) {
++        assertDotConversationAllowed(key, 'send');
++        dot.assertRun(key, request.runId, request.runToken);
++        if (!invokeDotSend) throw dotError('Dot 发送通道尚未就绪', 503);
++        return invokeDotSend(key, request);
++      },
++      inspectObservation(key) {
++        assertDotConversationAllowed(key, 'observe');
++        return inspectDotObservation(key);
++      },
++      restoreWakeTimers(key) {
++        assertDotConversationAllowed(key, 'observe');
++        if (inspectDotObservation(key).blocked) return;
++        const st = getSocialV2State(key);
++        if (!st.wakeConfig.infinite && !st.wakeConfig.sleepUntil) {
++          const wake = cfg.socialV2?.wake ?? {};
++          const minMs = Math.max(0, Number(wake.recommendedSleepMinMs) || 300000);
++          const maxMs = Math.max(minMs, Number(wake.recommendedSleepMaxMs) || 7200000);
++          let duration = minMs + Math.round(Math.random() * (maxMs - minMs));
++          if (Number(wake.sleepMinMs) > 0) duration = Math.max(duration, Number(wake.sleepMinMs));
++          if (Number(wake.sleepMaxMs) > 0) duration = Math.min(duration, Number(wake.sleepMaxMs));
++          st.wakeConfig.sleepUntil = new Date(Date.now() + duration).toISOString();
++        }
++        ensureWakeableV2(st, { key });
++        saveSocialV2State();
++        setupSleepTimerV2(key);
++        scheduleProactiveCheckV2(key);
++      },
++      replayPendingWakes(key, status) {
++        try { assertDotConversationAllowed(key, 'wake'); } catch { return; }
++        const st = getSocialV2State(key);
++        for (let n = 0; n < 20 && st.pendingWakeReasons?.length; n += 1) {
++          const replayed = replayPendingWakeReasonsV2(key);
++          if (dot.isBusy(key) || st.pendingWakeTimer) return;
++          if (replayed?.action === 'timer' && ((replayed.reason === 'timeout' && st.sleepTimer)
++              || (replayed.reason === 'replyCheck' && st.replyCheckTimer))) return;
++        }
++        // Lease recovery is bounded by the helper. Never create an extra retry
++        // merely because unread remains after its retry budget is exhausted.
++        if (status !== 'expired' && st.unread.length && !dot.isBusy(key) && !st.pendingWakeTimer) {
++          scheduleWakeV2(key, `dotRetry:${String(status || 'released')}`);
++        }
++      },
++      requestWake(key, reason) {
++        assertDotConversationAllowed(key, 'wake');
++        scheduleWakeV2(key, reason);
++      },
++      log: (message) => log(`[dot] ${message}`)
++    }
++  });
++
++  // Revoke DSH ownership before accepting any Dot requests. Rotate even when no
++  // DSH mapping exists, since reserved2 can persist tokens independently of it.
++  for (const key of dotConversationKeys) {
++    if (!isDotConversation(key)) continue;
++    if (state.sessions[key]) retireSession(key);
++    const st = getSocialV2State(key);
++    st.agentToken = crypto.randomBytes(24).toString('hex');
++    rememberAgentToken(key, st.agentToken);
++    st.modelSeenSeqs = new Set();
++    st.bootstrapSent = false;
++    queued.delete(key);
++    drainPromptQueue(key, '会话已由 Dot 接管');
++    delete state.sessions[key];
++    delete state.sessionPolicies[key];
++  }
++  if (cfg.dot.enabled === true) {
++    saveState();
++    saveSocialV2State();
++  }
++  process.once('exit', () => dot.close());
++
+   function isSocialEnabled() {
+     return currentMode === 'reserved' && cfg.social?.enabled !== false;
+   }
+@@ -9109,6 +9425,7 @@
+ 
+   // 实际的 DSH prompt 投递（不再直接对外暴露，统一走 promptQueues 串行队列）。
+   async function deliverPromptNow(key, promptText, opts = {}) {
++    if (isDotConversation(key)) throw dotError('Dot 会话不能投递到 DSH', 409);
+     if (!isSessionAllowedInCurrentMode(key)) throw new Error(`当前模式不允许会话 ${key}`);
+     // Recheck queued wakes at dispatch time: no model call while paused/disabled
+     // and no reserved2 prompt leaking into an ordinary chat after a mode switch.
+@@ -9195,6 +9512,7 @@
+   // 每个 QQ 会话串行投递 DSH prompt，保证 turn 完成顺序与提交顺序一致，
+   // 从而让 [SILENT]、摘要静默、退场标记都能准确匹配到自己的 turn。
+   function deliverPrompt(key, promptText, opts = {}) {
++    if (isDotConversation(key)) return Promise.reject(dotError('Dot 会话不接受 DSH 提示投递，请使用 Dot 唤醒入口', 409));
+     return new Promise((resolve, reject) => {
+       let entry = promptQueues.get(key);
+       if (!entry) {
+@@ -9865,6 +10183,7 @@
+       if (topicHit || participantHit) t.lastMentionAt = Date.now();
+     }
+     saveSocialV2State();
++    if (isDotConversation(key)) dot.onIncoming(key);
+   }
+ 
+   // 二代拍一拍事件写入最近/未读消息流，让 AI 能看到“谁拍了拍谁/拍了拍我”。
+@@ -10458,7 +10777,7 @@
+     st.wakeConfig.wakeCount = (st.wakeConfig.wakeCount || 0) + 1;
+     st.lastWakeReason = reason;
+     saveSocialV2State();
+-    const promptText = buildWakePromptV2(key, reason);
++    const promptText = isDotConversation(key) ? '' : buildWakePromptV2(key, reason);
+     log(`[reserved2] 唤醒 ${key}（${reason}）`);
+     const rollbackWakeTime = () => {
+       const idx = st.wakeTimes.lastIndexOf(wakeTime);
+@@ -10466,9 +10785,13 @@
+       saveSocialV2State();
+     };
+     try {
+-      pendingWakeKeys.add(key);
+-      armPendingWakeLease(key);
+-      const result = await deliverPrompt(key, promptText, { wakeReason: reason });
++      if (!isDotConversation(key)) {
++        pendingWakeKeys.add(key);
++        armPendingWakeLease(key);
++      }
++      const result = isDotConversation(key)
++        ? dot.enqueueWake(key, reason)
++        : await deliverPrompt(key, promptText, { wakeReason: reason });
+       const restoreFiniteSleep = () => {
+         if (hadFiniteSleep) {
+           st.wakeConfig.sleepUntil = prevSleepUntil;
+@@ -10486,7 +10809,7 @@
+       } else if (result && result.queued === true) {
+         // 入队而非真正在途：保留 pendingWakeKeys，等 DSH 恢复后真正投递的 turn/end 再触发收尾保护；
+         // 不能在这里删除，否则补投的唤醒回合会丢失“未设置唤醒配置”的安全兜底。
+-        log(`[reserved2] 唤醒已入队 ${key}（${reason}），等待 DSH 恢复后补投`);
++        log(`[reserved2] 唤醒已入队 ${key}（${reason}），后端=${isDotConversation(key) ? 'Dot' : 'DSH'}`);
+       }
+     } catch (error) {
+       pendingWakeKeys.delete(key);
+@@ -10532,6 +10855,7 @@
+   /** 会话此刻算忙的具体原因（只用于日志，避免排查时只能反复重启加猜）。 */
+   function busyReasonV2(key, st) {
+     if (st?.pendingWakeTimer) return 'pendingWakeTimer';
++    if (isDotConversation(key)) return dot?.busyReason(key) || 'dot-idle';
+     if (pendingWakeKeys.has(key)) return 'pendingWakeKey';
+     const q = promptQueues.get(key);
+     if (q?.running) return 'promptRunning';
+@@ -10546,6 +10870,7 @@
+ 
+   function isConversationBusyV2(key, st) {
+     if (st && st.pendingWakeTimer) return true;
++    if (isDotConversation(key)) return dot ? dot.isBusy(key) : true;
+     if (pendingWakeKeys.has(key)) return true;
+     const q = promptQueues.get(key);
+     if (q && (q.running || q.queue.length > 0)) return true;
+@@ -10763,6 +11088,7 @@
+   }
+ 
+   function clearSocialV2Timers(key) {
++    if (isDotConversation(key)) dot?.invalidate(key, 'conversation-timers-cleared');
+     const st = socialV2.conversations.get(key);
+     if (!st) return;
+     if (st.pendingWakeTimer) {
+@@ -10790,6 +11116,7 @@
+   }
+ 
+   function clearAllSocialV2Timers() {
++    for (const key of dotConversationKeys) if (isDotConversation(key)) dot?.invalidate(key, 'all-conversation-timers-cleared');
+     for (const key of socialV2.conversations.keys()) clearSocialV2Timers(key);
+     pendingWakeKeys.clear();
+     wakeConfigUpdatedKeys.clear();
+@@ -10855,6 +11182,9 @@
+     if (!plainContent && !quoteTargetIsSelf) return;
+     const isOwner = String(event.user_id) === String(cfg.ownerQQ ?? '');
+     const roleState = readRoleState();
++    // Only fixed bridge control acknowledgements use this internal bypass. It
++    // keeps the original policy/allowlist checks and exposes no model/API switch.
++    const sendControlReply = (message) => sendToQQ(key, message, true);
+ 
+     // 若该会话有挂起的提问/审批，先当作回答处理（用当前消息自己的文字，不含引用原文）。
+     // 审批只有管理员消息会被消费；群友消息不能因为“审批挂起”而被吞掉，应继续走正常处理。
+@@ -10873,17 +11203,22 @@
+ 
+     // 控制类话语：仅管理员（ownerQQ）可下达；群友触发直接拦截
+     if (!isOwner && /进入角色扮演|退出角色扮演|切换角色|设置角色|改角色|换角色|关闭角色扮演|开启角色扮演/.test(plainContent)) {
+-      await sendToQQ(key, '角色切换仅管理员可在管理端操作，群内不支持。');
++      await sendControlReply('角色切换仅管理员可在管理端操作，群内不支持。');
+       return;
+     }
+ 
+     // 管理命令：仅管理员（ownerQQ）可用，且由桥接直接执行（硬性，不经过模型）
+     if (plainContent.startsWith('/')) {
+       if (!isOwner) {
+-        await sendToQQ(key, '管理命令仅管理员可用。');
++        await sendControlReply('管理命令仅管理员可用。');
+         return;
+       }
+       if (plainContent === '/reset' || plainContent === '/new') {
++        if (isDotConversation(key)) {
++          resetDotConversation(key);
++          await sendControlReply('已重置 Dot 会话，下次消息将开新上下文');
++          return;
++        }
+         const old = state.sessions[key];
+         if (old) {
+           sessionEpoch++;
+@@ -10932,42 +11267,47 @@
+           try { await withTimeout(api.stopSessionWork(old), DSH_CONTROL_TIMEOUT_MS, 'stopSessionWork'); }
+           catch (error) { log(`⚠️ 停止旧会话失败 ${key}：${error?.message ?? error}；请在 DSH 检查旧任务`); }
+           try { await withTimeout(api.workspace.archiveSession({ sessionId: old }), DSH_CONTROL_TIMEOUT_MS, 'archiveSession'); } catch {}
+-          await sendToQQ(key, '已重置会话，下次消息将开新上下文');
++          await sendControlReply('已重置会话，下次消息将开新上下文');
+         }
+         return;
+       }
+       if (plainContent === '/status') {
+         const rs = readRoleState();
+-        await sendToQQ(key, `会话 ${state.sessions[key] ?? '未创建'}；白名单 ${allowed(kind, id, cfg) ? '通过' : '拦截'}；角色 ${rs.role ?? '无'}；模式 ${rs.mode}`);
++        await sendControlReply(`会话 ${state.sessions[key] ?? '未创建'}；白名单 ${allowed(kind, id, cfg) ? '通过' : '拦截'}；角色 ${rs.role ?? '无'}；模式 ${rs.mode}`);
+         return;
+       }
+       if (plainContent === '/role' || plainContent.startsWith('/role ')) {
+         const name = sanitizeRoleName(plainContent.slice(5).trim());
+         if (!name || name === 'off' || name === 'clear') {
+           writeRoleState(null, roleState.mode);
+-          await sendToQQ(key, '已清除角色，恢复正常人格。');
++          await sendControlReply('已清除角色，恢复正常人格。');
+         } else {
+           const roleFile = path.join(ROOT, 'roles', name + '.md');
+           if (!fs.existsSync(roleFile)) {
+-            await sendToQQ(key, `角色「${name}」不存在。角色文件放 qq-bridge/roles/ 目录。`);
++            await sendControlReply(`角色「${name}」不存在。角色文件放 qq-bridge/roles/ 目录。`);
+           } else {
+             writeRoleState(name, roleState.mode);
+-            await sendToQQ(key, `已切换角色：${name}。`);
++            await sendControlReply(`已切换角色：${name}。`);
+           }
+         }
+         return;
+       }
+       if (plainContent === '/silent' || plainContent === '/quiet') {
+         writeRoleState(roleState.role, 'silent');
+-        await sendToQQ(key, '已进入静默模式：群友消息不再回复，仅管理员可对话。');
++        await sendControlReply('已进入静默模式：群友消息不再回复，仅管理员可对话。');
+         return;
+       }
+       if (plainContent === '/active' || plainContent === '/speak') {
+         writeRoleState(roleState.role, 'active');
+-        await sendToQQ(key, '已退出静默模式，恢复正常回复。');
++        await sendControlReply('已退出静默模式，恢复正常回复。');
+         return;
+       }
+       // 其余 / 开头内容照常发给 DSH（DSH 的斜杠命令原样执行，如 /model）
++    }
++
++    if (isDotConversation(key) && currentMode !== 'reserved2') {
++      log(`[dot] 会话 ${key} 等待 reserved2 模式，不转入 DSH`);
++      return;
+     }
+ 
+     // 二代仿真模式（reserved2）：唤醒调度
+@@ -10975,7 +11315,7 @@
+       const sender = kind === 'group' ? (event.sender?.card || event.sender?.nickname || String(event.user_id)) : '私聊';
+       appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []));
+       // 二代同样收集群聊黑话学习素材（AI 自主提交之外，桥接仍自动提取高频陌生词）
+-      if (kind === 'group') feedSlangWindow(key, sender, plainContent);
++      if (kind === 'group' && !isDotConversation(key)) feedSlangWindow(key, sender, plainContent);
+       if (socialV2.paused) {
+         appendActivity(`${key} [reserved2] AI 已暂停，消息仅入库不唤醒：${textContent.slice(0, 80)}`);
+         return;
+@@ -12033,6 +12373,15 @@
+   startDshWatch();
+   startSnowlumaWatch();
+   startConsoleServer();
++  dot.start();
++  if (cfg.dot.enabled === true && currentMode === 'reserved2' && !socialV2.paused && cfg.socialV2?.enabled !== false) {
++    for (const key of dotConversationKeys) {
++      if (!isSessionAllowedInCurrentMode(key)) continue;
++      setupSleepTimerV2(key);
++      scheduleProactiveCheckV2(key);
++      if (getSocialV2State(key).unread.length) scheduleWakeV2(key, 'bootstrap');
++    }
++  }
+ 
+   await pumpMux();
+ }
