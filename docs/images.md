@@ -10,6 +10,8 @@
 
 打开 ChatGPT 的 QQBridge Dot 插件，右上“管理” → 页面底部“管理应用” → “刷新工具”。让 Dot 重新列出工具；总数为九个，新增三个图片工具。保持原有私聊及群聊订阅的精确过滤条件，不扩大权限，不重复建任务。
 
+如果状态已是新版而旧对话仍只有六个工具，先在一个新对话中 @QQBridge Dot 做只读列工具对照。[官方刷新流程](https://developers.openai.com/plugins/deploy/connect-chatgpt)也要求刷新后在新对话复测。qq_get_status.toolCatalog 表示服务实际提供的工具，并不证明当前模型会话已加载这些工具；lastMetadataScan 记录扫描时间、数量、名称和 schema 哈希。新对话能看到九个而旧对话只有六个时，问题在会话工具列表。保留原有两个订阅；自动事件任务是否已使用新工具，需要再用实际图片事件核对。
+
 ## 接收图片并识图
 
 1. 事件触发后，按原流程领取当前会话，用 qq_read_messages 分页读取消息。

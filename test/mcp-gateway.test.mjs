@@ -165,6 +165,10 @@ test('metadata scan diagnostics record actual event schema separately from tools
   let status = await f.gateway.call('qq_get_status', {});
   assert.equal(status.lastEventDiscovery, null);
   assert.equal(status.lastMetadataScan.count, 1);
+  assert.equal(status.lastMetadataScan.toolCount, 9);
+  assert.ok(status.lastMetadataScan.toolNames.includes('qq_send_image'));
+  assert.deepEqual(status.lastMetadataScan.toolNames, status.toolCatalog.names);
+  assert.equal(status.lastMetadataScan.schemaHash, status.toolCatalog.schemaHash);
   const events = await f.gateway.rpc('events/list');
   status = await f.gateway.call('qq_get_status', {});
   assert.deepEqual(

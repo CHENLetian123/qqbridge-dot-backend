@@ -39,7 +39,7 @@
       "skipped": 0
     },
     "component_tests": {
-      "passed": 9,
+      "passed": 10,
       "failed": 0,
       "skipped": 0
     },
@@ -48,11 +48,11 @@
     "patched_files": [
       {
         "path": "src/bridge.js",
-        "blob_sha": "61aa8d139d73c15bfe9d05a4a1b802be21a4969a"
+        "blob_sha": "abd79015ded8eda1e76f09f1fef1669679d286ed"
       },
       {
         "path": "src/dot-backend.mjs",
-        "blob_sha": "5c11ecce595ce62dde050024fba0c06e0120f868"
+        "blob_sha": "941da08abb9c2ac9aa4bd02bf00d8839652504da"
       },
       {
         "path": "src/dot-only-policy.mjs",

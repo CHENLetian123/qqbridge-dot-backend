@@ -26,7 +26,7 @@ export async function eventually(check, { timeoutMs = 8_000, message = 'Conditio
  * Runs the real patched upstream entrypoint with three explicit external mocks.
  * QQBRIDGE_SOURCE_DIR must already contain the applied patch and overlay.
  */
-export async function startBridge(t, { config = {}, seedState = {}, dshOnline = false, env = {} } = {}) {
+export async function startBridge(t, { config = {}, seedState = {}, roleCards = {}, dshOnline = false, env = {} } = {}) {
   const sourceSetting = process.env.QQBRIDGE_SOURCE_DIR;
   assert.ok(sourceSetting, 'QQBRIDGE_SOURCE_DIR must point to an already-patched QQBridge checkout.');
   const source = path.resolve(sourceSetting);
@@ -144,6 +144,11 @@ export async function startBridge(t, { config = {}, seedState = {}, dshOnline = 
   for (const [filename, value] of Object.entries(seedState)) {
     assert.equal(path.basename(filename), filename, 'Fixture state must be a direct state filename.');
     await fs.writeFile(path.join(stateDirectory, filename), JSON.stringify(value));
+  }
+  await fs.mkdir(path.join(runtime, 'roles'), { recursive: true });
+  for (const [name, content] of Object.entries(roleCards)) {
+    assert.match(name, /^[A-Za-z0-9_-]+$/);
+    await fs.writeFile(path.join(runtime, 'roles', name + '.md'), content);
   }
 
   const childEnvironment = {

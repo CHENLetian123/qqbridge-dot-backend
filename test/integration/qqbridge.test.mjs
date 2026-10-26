@@ -322,3 +322,24 @@ test('real bridge image bytes use the existing QQ send guard, quota, deduplicati
   success(await finish(bridge, run, page.readThroughSeq, 'replied'));
   assert.equal((await dot(bridge, imagePath, imageArgs)).status, 410);
 });
+
+test('configured persona reaches Dot claim context and health diagnoses missing cards without exposing the prompt', { timeout: 15000 }, async t => {
+  const bridge = await startBridge(t, { config: config(), seedState: { 'current-role.json': { role: 'FixturePersona', mode: 'active' } }, roleCards: { FixturePersona: '# Fixture character\n## Identity\nYou speak as the fixture character with a dry sense of humor.\n## Old transport [v1]\nlegacy-only-marker\n## Current style [v2]\ncurrent-style-marker' } });
+  const health = success(await dot(bridge, '/health'));
+  assert.equal(health.persona.name, 'FixturePersona');
+  assert.equal(health.persona.available, true);
+  assert.equal(JSON.stringify(health).includes('dry sense'), false);
+  await bridge.injectGroup(1001, 'role test');
+  const turn = await claim(bridge, await nextWake(bridge), 'persona-context');
+  assert.equal(turn.context.role.name, 'FixturePersona');
+  assert.match(turn.context.role.prompt, /current-style-marker/);
+  assert.doesNotMatch(turn.context.role.prompt, /legacy-only-marker/);
+  assert.match(turn.context.instructions, /Apply context.role.prompt/);
+  assert.equal(health.persona.promptChars, turn.context.role.prompt.length);
+  const page = await read(bridge, turn.run);
+  success(await finish(bridge, turn.run, page.readThroughSeq, 'silent'));
+  const fs = await import('node:fs/promises');
+  await fs.writeFile(bridge.stateDirectory + '/current-role.json', JSON.stringify({ role: 'MissingFixtureCard', mode: 'active' }));
+  const missing = success(await dot(bridge, '/health')).persona;
+  assert.equal(missing.configured, true); assert.equal(missing.available, false); assert.equal(missing.promptChars, 0);
+});

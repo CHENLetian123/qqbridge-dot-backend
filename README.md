@@ -212,6 +212,12 @@ qqbridge-dot-backend/tools/tunnel-client/bin/tunnel-client.exe
 
 支持 PNG、JPEG、GIF、WebP，单张最多 4 MiB、20 百万像素，单边最多 8192。图片链接不直接交给 QQ 下载；文件由本地网关安全下载并验证后发送。生成使用 Dot 本身的能力，本后端不另行调用图片生成 API 或使用隧道密钥计费生图。完整流程与限制见 [图片接入指南](docs/images.md)。
 
+## 角色卡与 QQ 人格
+
+Dot 每轮领取时会拿到 QQBridge 当前选择的角色卡，并按该角色组织 QQ 回复。用 qq_get_status 的 persona 检查：configured 表示已选择角色，available 表示实际读到了有效内容，promptChars 是二代模式筛选后的注入长度。选了角色但 available=false 时，检查角色文件、名称和模式小节；人设行为仍需要通过真实回复验收。
+
+如果某次模型身份回答不符合预期，先核对卡片本身是否要求披露模型身份。群聊口吻、角色自称和技术信息的回应范围可在本地卡片中设置；角色名不等于已核实的实际模型型号。卡片内容与旧会话的回复习惯是两个层面。详见 [人格接入说明](docs/persona.md)。
+
 ## 私聊跑通后，增加群聊或其他会话
 
 以增加 group:123456789 为例：
@@ -228,6 +234,7 @@ qqbridge-dot-backend/tools/tunnel-client/bin/tunnel-client.exe
 
 | 现象 | 检查与处理 |
 | --- | --- |
+| 状态新版但当前会话只有旧工具 | 对比 qq_get_status.toolCatalog 与 lastMetadataScan；刷新插件后，用新对话 @插件只读列工具。服务目录不是当前会话工具列表；保留已有任务，避免重复订阅 |
 | bridgeReachable=false | 检查 QQBridge 是否运行、补丁是否应用、Dot 是否启用、端口和专用令牌是否一致。插件连接成功不能替代这个检查。 |
 | tunnel_client_not_connected / did not poll | 官方隧道未运行或没有正常轮询；检查进程及当前控制面状态，恢复后再试。 |
 | MCP request timed out | 对照隧道、stdio、本地网关和桥接响应时间逐层检查；不要先认定是 QQ 离线。 |

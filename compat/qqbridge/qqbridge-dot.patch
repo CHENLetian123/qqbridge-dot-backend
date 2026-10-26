@@ -1,5 +1,5 @@
 diff --git a/src/bridge.js b/src/bridge.js
-index 9340068..61aa8d1 100644
+index 9340068..abd7901 100644
 --- a/src/bridge.js
 +++ b/src/bridge.js
 @@ -29,6 +29,9 @@ import { hardenDir, manualDirCommand } from './state-acl.mjs';
@@ -475,7 +475,7 @@ index 9340068..61aa8d1 100644
      const epoch = sessionEpoch;
      const policy = sessionPolicy(key);
      if (!isSessionAllowedInCurrentMode(key)) throw new Error(`当前模式不允许会话 ${key}`);
-@@ -8904,6 +9033,222 @@ async function main() {
+@@ -8904,6 +9033,227 @@ async function main() {
    // 操作者预写的会话初始提示词（与控制台入口同样在 main() 里；损坏时只读降级，不阻塞启动）。
    loadInitialPrompts();
  
@@ -558,6 +558,11 @@ index 9340068..61aa8d1 100644
 +    token: dotToken,
 +    hooks: {
 +      assertConversationAllowed: assertDotConversationAllowed,
++      personaStatus() {
++        const role = readRoleState().role || null;
++        const prompt = currentRoleHintV2();
++        return { name: role, configured: Boolean(role), promptChars: prompt.length, available: Boolean(prompt.trim()) };
++      },
 +      buildContext(key, reason) {
 +        assertDotConversationAllowed(key, 'context');
 +        const st = getSocialV2State(key);
@@ -573,7 +578,7 @@ index 9340068..61aa8d1 100644
 +          participation: formatParticipationV2(st),
 +          wakeConfig: JSON.parse(JSON.stringify(st.wakeConfig)),
 +          observation: inspectDotObservation(key),
-+          instructions: 'Read unread messages first. Images have indices; use qq_read_image with messageSeq to see them. Reply with text, forward an image, or generate a new image with your native image generation capability and send the actual file with qq_send_image. Never claim generation or delivery without a real file and a confirmed receipt. Finish with the continuous readThroughSeq and replied or silent.'
++          instructions: 'Apply context.role.prompt to the persona and wording of QQ-visible replies, and use context.self as your QQ identity. Keep the character voice distinct from assistant-to-operator explanations. Read unread messages first. Images have indices; use qq_read_image with messageSeq to see them. Reply with text, forward an image, or generate a new image with your native image generation capability and send the actual file with qq_send_image. Never claim generation or delivery without a real file and a confirmed receipt. Finish with the continuous readThroughSeq and replied or silent.'
 +        };
 +      },
 +      readUnread(key, afterSeq = 0, limit = 30) {
@@ -698,7 +703,7 @@ index 9340068..61aa8d1 100644
    function isSocialEnabled() {
      return currentMode === 'reserved' && cfg.social?.enabled !== false;
    }
-@@ -9109,6 +9454,7 @@ async function main() {
+@@ -9109,6 +9459,7 @@ async function main() {
  
    // 实际的 DSH prompt 投递（不再直接对外暴露，统一走 promptQueues 串行队列）。
    async function deliverPromptNow(key, promptText, opts = {}) {
@@ -706,7 +711,7 @@ index 9340068..61aa8d1 100644
      if (!isSessionAllowedInCurrentMode(key)) throw new Error(`当前模式不允许会话 ${key}`);
      // Recheck queued wakes at dispatch time: no model call while paused/disabled
      // and no reserved2 prompt leaking into an ordinary chat after a mode switch.
-@@ -9195,6 +9541,7 @@ async function main() {
+@@ -9195,6 +9546,7 @@ async function main() {
    // 每个 QQ 会话串行投递 DSH prompt，保证 turn 完成顺序与提交顺序一致，
    // 从而让 [SILENT]、摘要静默、退场标记都能准确匹配到自己的 turn。
    function deliverPrompt(key, promptText, opts = {}) {
@@ -714,7 +719,7 @@ index 9340068..61aa8d1 100644
      return new Promise((resolve, reject) => {
        let entry = promptQueues.get(key);
        if (!entry) {
-@@ -9865,6 +10212,7 @@ async function main() {
+@@ -9865,6 +10217,7 @@ async function main() {
        if (topicHit || participantHit) t.lastMentionAt = Date.now();
      }
      saveSocialV2State();
@@ -722,7 +727,7 @@ index 9340068..61aa8d1 100644
    }
  
    // 二代拍一拍事件写入最近/未读消息流，让 AI 能看到“谁拍了拍谁/拍了拍我”。
-@@ -10458,7 +10806,7 @@ async function main() {
+@@ -10458,7 +10811,7 @@ async function main() {
      st.wakeConfig.wakeCount = (st.wakeConfig.wakeCount || 0) + 1;
      st.lastWakeReason = reason;
      saveSocialV2State();
@@ -731,7 +736,7 @@ index 9340068..61aa8d1 100644
      log(`[reserved2] 唤醒 ${key}（${reason}）`);
      const rollbackWakeTime = () => {
        const idx = st.wakeTimes.lastIndexOf(wakeTime);
-@@ -10466,9 +10814,13 @@ async function main() {
+@@ -10466,9 +10819,13 @@ async function main() {
        saveSocialV2State();
      };
      try {
@@ -748,7 +753,7 @@ index 9340068..61aa8d1 100644
        const restoreFiniteSleep = () => {
          if (hadFiniteSleep) {
            st.wakeConfig.sleepUntil = prevSleepUntil;
-@@ -10486,7 +10838,7 @@ async function main() {
+@@ -10486,7 +10843,7 @@ async function main() {
        } else if (result && result.queued === true) {
          // 入队而非真正在途：保留 pendingWakeKeys，等 DSH 恢复后真正投递的 turn/end 再触发收尾保护；
          // 不能在这里删除，否则补投的唤醒回合会丢失“未设置唤醒配置”的安全兜底。
@@ -757,7 +762,7 @@ index 9340068..61aa8d1 100644
        }
      } catch (error) {
        pendingWakeKeys.delete(key);
-@@ -10532,6 +10884,7 @@ async function main() {
+@@ -10532,6 +10889,7 @@ async function main() {
    /** 会话此刻算忙的具体原因（只用于日志，避免排查时只能反复重启加猜）。 */
    function busyReasonV2(key, st) {
      if (st?.pendingWakeTimer) return 'pendingWakeTimer';
@@ -765,7 +770,7 @@ index 9340068..61aa8d1 100644
      if (pendingWakeKeys.has(key)) return 'pendingWakeKey';
      const q = promptQueues.get(key);
      if (q?.running) return 'promptRunning';
-@@ -10546,6 +10899,7 @@ async function main() {
+@@ -10546,6 +10904,7 @@ async function main() {
  
    function isConversationBusyV2(key, st) {
      if (st && st.pendingWakeTimer) return true;
@@ -773,7 +778,7 @@ index 9340068..61aa8d1 100644
      if (pendingWakeKeys.has(key)) return true;
      const q = promptQueues.get(key);
      if (q && (q.running || q.queue.length > 0)) return true;
-@@ -10763,6 +11117,7 @@ async function main() {
+@@ -10763,6 +11122,7 @@ async function main() {
    }
  
    function clearSocialV2Timers(key) {
@@ -781,7 +786,7 @@ index 9340068..61aa8d1 100644
      const st = socialV2.conversations.get(key);
      if (!st) return;
      if (st.pendingWakeTimer) {
-@@ -10790,6 +11145,7 @@ async function main() {
+@@ -10790,6 +11150,7 @@ async function main() {
    }
  
    function clearAllSocialV2Timers() {
@@ -789,7 +794,7 @@ index 9340068..61aa8d1 100644
      for (const key of socialV2.conversations.keys()) clearSocialV2Timers(key);
      pendingWakeKeys.clear();
      wakeConfigUpdatedKeys.clear();
-@@ -10855,6 +11211,9 @@ async function main() {
+@@ -10855,6 +11216,9 @@ async function main() {
      if (!plainContent && !quoteTargetIsSelf) return;
      const isOwner = String(event.user_id) === String(cfg.ownerQQ ?? '');
      const roleState = readRoleState();
@@ -799,7 +804,7 @@ index 9340068..61aa8d1 100644
  
      // 若该会话有挂起的提问/审批，先当作回答处理（用当前消息自己的文字，不含引用原文）。
      // 审批只有管理员消息会被消费；群友消息不能因为“审批挂起”而被吞掉，应继续走正常处理。
-@@ -10873,17 +11232,22 @@ async function main() {
+@@ -10873,17 +11237,22 @@ async function main() {
  
      // 控制类话语：仅管理员（ownerQQ）可下达；群友触发直接拦截
      if (!isOwner && /进入角色扮演|退出角色扮演|切换角色|设置角色|改角色|换角色|关闭角色扮演|开启角色扮演/.test(plainContent)) {
@@ -824,7 +829,7 @@ index 9340068..61aa8d1 100644
          const old = state.sessions[key];
          if (old) {
            sessionEpoch++;
-@@ -10932,50 +11296,55 @@ async function main() {
+@@ -10932,50 +11301,55 @@ async function main() {
            try { await withTimeout(api.stopSessionWork(old), DSH_CONTROL_TIMEOUT_MS, 'stopSessionWork'); }
            catch (error) { log(`⚠️ 停止旧会话失败 ${key}：${error?.message ?? error}；请在 DSH 检查旧任务`); }
            try { await withTimeout(api.workspace.archiveSession({ sessionId: old }), DSH_CONTROL_TIMEOUT_MS, 'archiveSession'); } catch {}
@@ -888,7 +893,7 @@ index 9340068..61aa8d1 100644
        if (socialV2.paused) {
          appendActivity(`${key} [reserved2] AI 已暂停，消息仅入库不唤醒：${textContent.slice(0, 80)}`);
          return;
-@@ -11339,6 +11708,7 @@ async function main() {
+@@ -11339,6 +11713,7 @@ async function main() {
    }
  
    async function pumpMux() {
@@ -896,7 +901,7 @@ index 9340068..61aa8d1 100644
      // 事件流重连退避：DSH 侧流被立刻关闭时（例如版本不兼容，见 issue #34），
      // 固定 3 秒重连会以每分钟 20 行的速度刷屏，真正有用的错误反而被淹没。
      let retryMs = 3000;
-@@ -12031,8 +12401,18 @@ async function main() {
+@@ -12031,8 +12406,18 @@ async function main() {
      syncStickerLibrary(true).catch((error) => log('启动预热表情库失败:', error?.message ?? error));
    }
    startDshWatch();

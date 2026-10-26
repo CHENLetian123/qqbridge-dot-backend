@@ -460,7 +460,7 @@ export class DotBackend {
       if (req.headers['sec-fetch-site'] === 'cross-site') fail('ORIGIN_DENIED', 'Cross-site requests are not allowed.', 403);
       const prefix = '/api/dot/v1';
       if (req.method === 'GET' && url.pathname === `${prefix}/health`) {
-        sendJson({ ok: true, protocolVersion: 1, storage: 'memory', conversations: this.#keys.size, instanceId: this.#epoch });
+        sendJson({ ok: true, protocolVersion: 1, storage: 'memory', conversations: this.#keys.size, instanceId: this.#epoch, persona: this.#hooks.personaStatus?.() ?? null });
         return;
       }
       if (req.method === 'GET' && url.pathname === `${prefix}/wakes`) { sendJson(this.listWakes()); return; }
