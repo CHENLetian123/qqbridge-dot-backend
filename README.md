@@ -282,3 +282,5 @@ state/、运行日志、环境文件和下载的隧道二进制已从 Git 排除
 本仓库原创内容使用 MIT 许可，QQBridge 原始许可完整保存在 [UPSTREAM-LICENSE](compat/qqbridge/UPSTREAM-LICENSE)，包含上游公开署名及其原有联系信息。本项目与 QQBridge、SnowLuma 或 OpenAI 无官方关联。package.json 的 private=true 只防止误发布到 npm。
 
 协议和产品操作参考：[MCP Events](https://developers.openai.com/plugins/build/mcp-events)、[Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)、[插件连接与刷新](https://developers.openai.com/plugins/deploy/connect-chatgpt)。工作区策略和界面变化时，以官方文档与当前实际界面为准。
+
+Windows 管理器现在可以直接管理 Dot Tunnel：启动、停止、重连、连接健康检查和异常自动重启均在同一窗口完成。首次启动在本地密码框输入运行密钥，仅存当前管理器内存。详见 [管理器说明](launcher/windows/README.md#隧道密钥与重连)。

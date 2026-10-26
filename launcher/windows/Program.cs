@@ -23,7 +23,7 @@ internal static class Program
         ApplicationConfiguration.Initialize();
         using var mutex = new Mutex(true, "Local\\GPTBotManager-" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(AppContext.BaseDirectory)))[..16], out bool first);
         if (!first) { MessageBox.Show("管理器已经在运行，请查看任务栏。", "GPTBot 管理器"); return; }
-        try { Application.Run(new ManagerForm()); }
+        try { using var form = new ManagerForm(); if (args.Contains("--start-all")) form.Shown += async (_, _) => await form.StartFromLaunch(); Application.Run(form); }
         catch (Exception ex) { MessageBox.Show(ex.Message, "管理器启动失败"); }
     }
 }
@@ -59,7 +59,7 @@ internal sealed class ManagedProcess : IDisposable
     public Process Process { get; }
     readonly ProcessJob job;
     public bool Running => !Process.HasExited;
-    public ManagedProcess(string file, string args, string cwd, Action<string> output)
+    public ManagedProcess(string file, string args, string cwd, Action<string> output, IReadOnlyDictionary<string, string?>? environment = null)
     {
         job = new ProcessJob();
         Process = new Process { StartInfo = new ProcessStartInfo(file, args) {
@@ -68,10 +68,14 @@ internal sealed class ManagedProcess : IDisposable
             StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8
         }};
         Process.StartInfo.Environment["NO_COLOR"] = "1";
+        if (environment != null) foreach (var (key, value) in environment) {
+            if (value == null) Process.StartInfo.Environment.Remove(key);
+            else Process.StartInfo.Environment[key] = value;
+        }
         Process.OutputDataReceived += (_, e) => { if (e.Data != null) output(e.Data); };
         Process.ErrorDataReceived += (_, e) => { if (e.Data != null) output("[stderr] " + e.Data); };
         try {
-            Process.Start(); job.Assign(Process);
+            Process.Start(); Process.StartInfo.Environment.Remove("CONTROL_PLANE_API_KEY"); job.Assign(Process);
             Process.BeginOutputReadLine(); Process.BeginErrorReadLine();
         } catch {
             try { if (!Process.HasExited) Process.Kill(true); } catch { }
@@ -97,6 +101,7 @@ internal sealed class Service(string id, string name, params int[] ports)
     public CancellationTokenSource? StartupCancellation;
     public DateTime RetryAt;
     public int? ExitCode;
+    public int RestartAttempts;
     public readonly SemaphoreSlim Gate = new(1);
     public readonly ConcurrentQueue<string> Pending = new();
     public readonly Queue<string> History = new();
@@ -123,14 +128,15 @@ internal sealed class ManagerForm : Form
     readonly int dshPort = 3080, consolePort = 3100;
     readonly int snowWebPort = int.TryParse(Environment.GetEnvironmentVariable("QQB_SNOWLUMA_WEB_PORT"), out int sp) && sp > 0 && sp <= 65535 ? sp : 5099;
     readonly int dotPort = 3112;
-    readonly Service snow, dsh, bridge, dot;
+    readonly Service snow, dsh, bridge, dot, tunnel;
+    readonly TunnelRuntime tunnelRuntime;
     readonly Service[] services;
     readonly RichTextBox log = new() { Dock = DockStyle.Fill, ReadOnly = true, BackColor = Color.FromArgb(23, 30, 43), ForeColor = Color.FromArgb(218, 228, 242), Font = new Font("Consolas", 10), BorderStyle = BorderStyle.None, WordWrap = false };
     readonly ComboBox filter = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 180 };
-    readonly CheckBox autoRestart = new() { Text = "桥接异常退出后自动重启", Checked = true, AutoSize = true };
+    readonly CheckBox autoRestart = new() { Text = "服务异常退出后自动重启", Checked = true, AutoSize = true };
     readonly System.Windows.Forms.Timer timer = new() { Interval = 700 };
     CancellationTokenSource? batch;
-    bool closing, allowClose;
+    bool closing, allowClose, ticking;
 
     public ManagerForm()
     {
@@ -160,20 +166,24 @@ internal sealed class ManagerForm : Form
         dsh = new("dsh", "DSH", dshPort);
         bridge = new("bridge", "QQ Bridge", consolePort);
         dot = new("dot", "Dot MCP", dotPort);
-        services = dotOnly ? [snow, bridge, dot] : [snow, dsh, bridge, dot];
-        Text = "GPTBot 管理器"; Size = new Size(1100, 840); MinimumSize = new Size(900, 700);
+        tunnel = new("tunnel", "Dot Tunnel");
+        tunnelRuntime = new(dotDirectory);
+        services = dotOnly ? [snow, bridge, dot, tunnel] : [snow, dsh, bridge, dot, tunnel];
+        Text = "GPTBot 管理器"; Size = new Size(1100, 920); MinimumSize = new Size(960, 800);
         StartPosition = FormStartPosition.CenterScreen; Font = new Font("Microsoft YaHei UI", 10);
         BackColor = Color.FromArgb(243, 246, 251);
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(24), ColumnCount = 1, RowCount = 6 };
         layout.RowStyles.Add(new(SizeType.Absolute, 63)); layout.RowStyles.Add(new(SizeType.Absolute, 48));
-        layout.RowStyles.Add(new(SizeType.Absolute, 248)); layout.RowStyles.Add(new(SizeType.Absolute, 48));
+        layout.RowStyles.Add(new(SizeType.Absolute, dotOnly ? 310 : 365)); layout.RowStyles.Add(new(SizeType.Absolute, 48));
         layout.RowStyles.Add(new(SizeType.Percent, 100)); layout.RowStyles.Add(new(SizeType.Absolute, 35));
         Controls.Add(layout);
         layout.Controls.Add(new Label { Text = "GPTBot  /  运行管理", Font = new Font(Font.FontFamily, 23, FontStyle.Bold), AutoSize = true, ForeColor = Color.FromArgb(27, 46, 76) });
         var tools = new FlowLayoutPanel { Dock = DockStyle.Fill };
         var all = MakeButton("一键启动", async () => await StartAll());
         var stopAll = MakeButton("全部停止", async () => { batch?.Cancel(); await StopAll(); });
-        tools.Controls.AddRange([all, stopAll, autoRestart]); layout.Controls.Add(tools);
+        tools.Controls.AddRange([all, stopAll, autoRestart]);
+        tools.Controls.Add(MakeButton("隧道密钥", () => { if (tunnelRuntime.RequestKey(this)) tunnel.Log("已设置隧道密钥（仅当前管理器内存）；下次连接或重连时使用。"); return Task.CompletedTask; }));
+        layout.Controls.Add(tools);
         var rows = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 6, RowCount = services.Length, BackColor = Color.White, Padding = new Padding(12) };
         rows.ColumnStyles.Add(new(SizeType.Absolute, 145)); rows.ColumnStyles.Add(new(SizeType.Percent, 100));
         for (int i = 0; i < 3; i++) rows.ColumnStyles.Add(new(SizeType.Absolute, 95));
@@ -184,9 +194,9 @@ internal sealed class ManagerForm : Form
             svc.Status = new Label { AutoSize = true, Anchor = AnchorStyles.Left }; rows.Controls.Add(svc.Status, 1, i);
             svc.Start = MakeButton("启动", async () => await StartService(svc));
             svc.Stop = MakeButton("停止", async () => await StopService(svc));
-            svc.Restart = MakeButton("重启", async () => { await StopService(svc); await StartService(svc); });
+            svc.Restart = MakeButton(svc == tunnel ? "重连" : "重启", async () => { await StopService(svc); await StartService(svc); });
             rows.Controls.Add(svc.Start, 2, i); rows.Controls.Add(svc.Stop, 3, i); rows.Controls.Add(svc.Restart, 4, i);
-            var backend = MakeButton(svc == dot ? "接入状态" : "管理后台", async () => {
+            var backend = MakeButton(svc == dot ? "接入状态" : svc == tunnel ? "连接状态" : "管理后台", async () => {
                 try { await OpenBackend(svc); }
                 catch (Exception e) { svc.Log("打开管理后台失败：" + e.Message); }
             });
@@ -206,6 +216,7 @@ internal sealed class ManagerForm : Form
         if (!dotOnly) dsh.Log("使用启动器：" + dshCli);
         else bridge.Log("全部白名单会话使用 Dot 后端；DSH 已从启动流程撤下。");
         dot.Log("本地服务目录：" + dotDirectory + "；连接账号和切换桥接需另行配置。");
+        tunnel.Log("由管理器直接运行官方 tunnel-client；密钥仅存内存。关闭管理器也会停止隧道。");
         FormClosing += OnClosing;
         timer.Tick += async (_, _) => await Tick(); timer.Start();
     }
@@ -251,13 +262,23 @@ internal sealed class ManagerForm : Form
     {
         if (closing) return;
         await s.Gate.WaitAsync(); s.Busy = true;
-        s.StartupCancellation = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        s.StartupCancellation = new CancellationTokenSource(s == tunnel ? Timeout.InfiniteTimeSpan : TimeSpan.FromSeconds(60));
         try {
             if (closing || s.Running) return;
+            if (s == tunnel) {
+                var health = await tunnelRuntime.Probe(true);
+                if (health.BaseUri != null) { s.Log("检测到外部隧道实例，请在原启动位置停止后再由本管理器接管。"); return; }
+                if (!tunnelRuntime.Available) throw new FileNotFoundException("找不到官方 tunnel-client 或 qq-dot 隧道配置，请先按接入指南完成隧道配置。");
+                if (!ListeningPorts().Contains(dotPort)) throw new Exception("请先启动 Dot MCP，再连接隧道。");
+                if (tunnelRuntime.Key == null && !tunnelRuntime.RequestKey(this)) { s.Desired = false; return; }
+            }
             if (s.Listening(ListeningPorts())) { s.Log("端口已被外部实例占用；请先在原启动位置停止该实例。"); return; }
             if (s.Child != null) { await s.Child.Stop(); s.Child.Dispose(); s.Child = null; }
             s.Desired = true; s.ExitCode = null;
-            if (s == dot) {
+            if (s == tunnel) {
+                s.Child = new ManagedProcess(tunnelRuntime.Executable, tunnelRuntime.Arguments, dotDirectory,
+                    line => tunnelRuntime.RecordOutput(line, tunnel.Log), tunnelRuntime.EnvironmentForChild());
+            } else if (s == dot) {
                 if (!File.Exists(Path.Combine(dotDirectory, "scripts", "start-mcp.mjs")) || !File.Exists(Path.Combine(dotDirectory, "state", "mcp-config.json"))) throw new FileNotFoundException("Dot MCP 本地服务或配置不存在，请先完成 setup:mcp。");
                 s.Child = new ManagedProcess(node, "scripts/start-mcp.mjs", dotDirectory, s.Log);
             } else if (s == snow) {
@@ -297,6 +318,7 @@ internal sealed class ManagerForm : Form
         } finally { s.Busy = false; s.Gate.Release(); }
     }
     async Task StopAll() { foreach (var s in services.Reverse()) await StopService(s); }
+    public Task StartFromLaunch() => StartAll();
     async Task StartAll()
     {
         if (batch != null) return;
@@ -317,23 +339,39 @@ internal sealed class ManagerForm : Form
             token.ThrowIfCancellationRequested();
             if (File.Exists(Path.Combine(dotDirectory, "state", "mcp-config.json"))) await StartService(dot);
             else if (dotOnly) throw new Exception("Dot MCP 配置缺失，无法启动唯一 AI 后端。");
+            if (tunnelRuntime.Available) {
+                var deadline = DateTime.UtcNow.AddSeconds(15);
+                while (!ListeningPorts().Contains(dotPort)) {
+                    token.ThrowIfCancellationRequested();
+                    if (DateTime.UtcNow > deadline) throw new Exception("等待 Dot MCP 启动超时。");
+                    await Task.Delay(300, token);
+                }
+                token.ThrowIfCancellationRequested(); await StartService(tunnel);
+            } else tunnel.Log("隧道尚未配置；本地服务已启动，请按接入指南准备官方客户端及 qq-dot 配置。");
         } catch (OperationCanceledException) { bridge.Log("一键启动已取消。"); }
         catch (Exception e) { bridge.Log(e.Message); }
         finally { batch.Dispose(); batch = null; }
     }
     async Task Tick()
     {
-        if (closing) return;
+        if (closing || ticking) return;
+        ticking = true;
+        try {
+        var tunnelHealth = await tunnelRuntime.Probe();
         HashSet<int> ports; try { ports = ListeningPorts(); } catch { ports = []; }
         foreach (var s in services) {
             if (s.Child != null && !s.Running && s.ExitCode == null && !s.Busy) {
-                s.ExitCode = s.Child.Process.ExitCode; s.RetryAt = DateTime.UtcNow.AddSeconds(5);
+                s.ExitCode = s.Child.Process.ExitCode; s.RetryAt = DateTime.UtcNow.AddSeconds(s == tunnel ? Math.Min(60, 5 * Math.Pow(2, Math.Min(s.RestartAttempts++, 4))) : 5);
                 s.Log("进程退出，退出码 " + s.ExitCode);
                 if (s.ExitCode == 2) s.Desired = false;
             }
-            var ready = s.Listening(ports);
+            var ready = s == tunnel ? tunnelHealth.BaseUri != null : s.Listening(ports);
             s.Status.Text = s.Running ? (ready ? "运行中" : "启动中 / 等待端口") + " · PID " + s.Child!.Process.Id : ready ? "外部实例 · 本程序未接管" : s.ExitCode.HasValue ? "已退出 · 代码 " + s.ExitCode : "未运行";
-            s.Status.ForeColor = s.Running && ready ? Color.FromArgb(17, 126, 85) : ready ? Color.DarkOrange : Color.DimGray;
+            if (s == tunnel) {
+                s.Status.Text = s.Running ? (tunnelHealth.Ready ? "已连接" : "运行中 / 等待连接") + " · PID " + s.Child!.Process.Id : tunnelHealth.BaseUri != null ? (tunnelHealth.Ready ? "已连接" : "连接异常") + " · 外部实例" : s.ExitCode.HasValue ? "已退出 · 代码 " + s.ExitCode : "未连接";
+                if (tunnelHealth.Ready) s.RestartAttempts = 0;
+            }
+            s.Status.ForeColor = s.Running && ready && (s != tunnel || tunnelHealth.Ready) ? Color.FromArgb(17, 126, 85) : ready ? Color.DarkOrange : Color.DimGray;
             s.Start.Enabled = !s.Busy && !s.Running && !ready;
             s.Stop.Enabled = !s.Busy && s.Child != null;
             s.Restart.Enabled = !s.Busy && s.Child != null;
@@ -347,9 +385,16 @@ internal sealed class ManagerForm : Form
         if (bridge.Desired && !bridge.Running && bridge.Child != null && !bridge.Busy && autoRestart.Checked && bridge.ExitCode is not null and not 2 && DateTime.UtcNow >= bridge.RetryAt) {
             bridge.Log("5 秒后自动重启桥接。"); await StartService(bridge);
         }
-        if (dotOnly && dot.Desired && !dot.Running && dot.Child != null && !dot.Busy && autoRestart.Checked && dot.ExitCode is not null and not 2 && DateTime.UtcNow >= dot.RetryAt) {
+        if (dot.Desired && !dot.Running && dot.Child != null && !dot.Busy && autoRestart.Checked && dot.ExitCode is not null and not 2 && DateTime.UtcNow >= dot.RetryAt) {
             dot.Log("自动重启 Dot MCP。"); await StartService(dot);
         }
+        if (tunnelRuntime.AuthenticationFailed && !tunnel.Busy) {
+            await StopService(tunnel); tunnelRuntime.ForgetKey();
+            tunnel.Log("隧道密钥认证失败，已停止重试。请点“隧道密钥”更新后再启动。");
+        } else if (tunnel.Desired && !tunnel.Running && tunnel.Child != null && !tunnel.Busy && autoRestart.Checked && tunnel.ExitCode != null && DateTime.UtcNow >= tunnel.RetryAt && tunnelHealth.BaseUri == null) {
+            tunnel.Log("正在自动重连隧道。"); await StartService(tunnel);
+        }
+        } finally { ticking = false; }
     }
     void RepaintLog()
     {
@@ -359,6 +404,17 @@ internal sealed class ManagerForm : Form
     }
     async Task OpenBackend(Service service)
     {
+        if (service == tunnel) {
+            var health = await tunnelRuntime.Probe(true);
+            string detail = "官方客户端：" + (tunnel.Running ? "由管理器运行" : health.Live ? "外部实例" : "未运行") +
+                "\n隧道连接：" + health.Summary + "\n本地密钥：" + (tunnelRuntime.Key != null ? "已设置（仅内存）" : "未设置") +
+                "\n\n启动、停止和重连均在此管理器内完成；自动重连需要管理器保持运行。";
+            if (health.BaseUri != null) {
+                if (MessageBox.Show(this, detail + "\n\n打开官方客户端本地管理后台？", "Dot Tunnel 连接状态", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
+                    Process.Start(new ProcessStartInfo(new Uri(health.BaseUri, "ui").AbsoluteUri) { UseShellExecute = true });
+            } else MessageBox.Show(this, detail, "Dot Tunnel 连接状态");
+            return;
+        }
         if (service == dot) {
             if (!ListeningPorts().Contains(dotPort)) { dot.Log("Dot MCP 尚未启动，请先点击启动。"); return; }
             var configFile = Path.Combine(dotDirectory, "state", "mcp-config.json");
@@ -427,7 +483,7 @@ internal sealed class ManagerForm : Form
         closing = true; timer.Stop(); Enabled = false; batch?.Cancel();
         try { await StopAll(); }
         catch (Exception ex) { MessageBox.Show("停止服务时出错：" + ex.Message); }
-        finally { foreach (var s in services) s.Child?.Dispose(); allowClose = true; Close(); }
+        finally { foreach (var s in services) s.Child?.Dispose(); tunnelRuntime.ForgetKey(); allowClose = true; Close(); }
     }
 }
 
@@ -438,6 +494,7 @@ internal static class SmokeTest
         var dir = Path.Combine(AppContext.BaseDirectory, "gptbot-manager-test-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(dir);
         var lines = new ConcurrentQueue<string>();
         try {
+            await TunnelSmokeTest.Run(dir);
             var script = Path.Combine(dir, "fixture.cjs");
             File.WriteAllText(script, "const {spawn}=require('child_process');const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore',windowsHide:true});console.log('child='+c.pid);console.log('中文日志');console.error('stderr-ok');setInterval(()=>{},1000);", new UTF8Encoding(false));
             using var child = new ManagedProcess("node.exe", "\"" + script + "\"", dir, lines.Enqueue);
@@ -449,7 +506,7 @@ internal static class SmokeTest
             try { using var p = Process.GetProcessById(descendant); if (!p.HasExited) throw new Exception("Descendant survived stop"); } catch (ArgumentException) { }
             using var exited = new ManagedProcess("node.exe", "-e \"process.exit(7)\"", dir, lines.Enqueue);
             await exited.Process.WaitForExitAsync(); if (exited.Process.ExitCode != 7) throw new Exception("Exit code lost");
-            File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "manager-test-result.txt"), "PASS: hidden process startup, UTF-8 stdout/stderr, exit codes, stop and descendant cleanup.");
+            File.WriteAllText(Path.Combine(AppContext.BaseDirectory, "manager-test-result.txt"), "PASS: hidden process startup, UTF-8 stdout/stderr, exit codes, stop and descendant cleanup; tunnel readiness, stale health, secret environment isolation and log redaction.");
         } finally { Directory.Delete(dir, true); }
     }
 }
