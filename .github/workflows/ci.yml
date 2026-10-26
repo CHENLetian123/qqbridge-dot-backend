@@ -14,8 +14,12 @@ concurrency:
 
 jobs:
   offline:
-    name: Node 24 offline tests
-    runs-on: ubuntu-latest
+    name: Node 24 tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -25,6 +29,10 @@ jobs:
         with:
           node-version: '24'
           package-manager-cache: false
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+      - name: Check formatting
+        run: npm run format:check
       - name: Run unit and installer tests
         run: npm test
       - name: Run offline lifecycle demo
@@ -53,6 +61,8 @@ jobs:
           package-manager-cache: false
       - name: Validate baseline and patch without modifying upstream
         run: node scripts/apply-qqbridge-patch.mjs --source "$QQBRIDGE_SOURCE_DIR" --check
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
       - name: Apply the QQBridge adapter
         run: node scripts/apply-qqbridge-patch.mjs --source "$QQBRIDGE_SOURCE_DIR"
       - name: Verify repeat application
@@ -61,3 +71,28 @@ jobs:
       # Missing upstream source is an error; test:integration must not silently skip.
       - name: Exercise the patched upstream HTTP routes and lifecycle
         run: npm run test:integration
+
+  windows-manager:
+    name: Windows manager process lifecycle
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build native manager
+        run: .\launcher\windows\build.ps1
+      - name: Check hidden process lifecycle and descendant cleanup
+        shell: pwsh
+        run: |
+          $binary = (Resolve-Path '.\launcher\windows\publish\GPTBot管理器.exe').Path
+          $check = Start-Process -FilePath $binary -ArgumentList '--self-test' -Wait -PassThru
+          if ($check.ExitCode -ne 0) { throw 'Manager lifecycle self-test failed.' }
+          Get-Content '.\launcher\windows\publish\manager-test-result.txt'

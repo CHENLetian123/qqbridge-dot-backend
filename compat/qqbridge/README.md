@@ -2,17 +2,18 @@
 
 ## 当前状态
 
-**状态：实验性适配已实现，提供固定基线补丁和安装器。组件测试运行真实桥接程序，外部 QQ / DSH 使用本机替身；真实 QQ / Dot 兼容性仍未验证。**
+**状态：固定基线适配、安装器、MCP 和 Events 已实现。组件测试运行真实桥接程序；另在保留用户本地改动的安装上验证过真实 Dot 事件和私聊自动回复。验证边界见 [记录](../../docs/verification.md)。**
 
-- 检查日期：2026-10-25
+- 检查日期：2026-10-26
 - 上游：[`Derpyu520/qq-bridge`](https://github.com/Derpyu520/qq-bridge)
 - 固定 commit：[`a49877f4e58d04e47532d44b803360d0f001160d`](https://github.com/Derpyu520/qq-bridge/tree/a49877f4e58d04e47532d44b803360d0f001160d)
 - 机器可读记录：[baseline.json](./baseline.json)
 - 补丁：[qqbridge-dot.patch](qqbridge-dot.patch)
 - 随补丁安装的模块：[overlay/src/dot-backend.mjs](overlay/src/dot-backend.mjs)
+- 纯 Dot 策略：[overlay/src/dot-only-policy.mjs](overlay/src/dot-only-policy.mjs)
 - 安装步骤：[本地联调](../../docs/local-integration.md)
 - 实际接口：[本地 API v1](../../docs/local-api.md)
-- 真实 MCP/Events、运行账本持久化及真实 QQ/Dot 联调尚未完成。
+- 配置 dot.only=true 后，全部显式白名单会话归 Dot，DSH 客户端、探活、设置同步和事件流不会启动。桥接运行账本的完整恢复仍未实现。
 
 本记录不表示支持该 commit 之前或之后的任何发行版。更换上游版本必须重新检查边界并运行集成验证；文件 blob SHA 不能用作仓库 commit。
 

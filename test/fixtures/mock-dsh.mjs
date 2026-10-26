@@ -34,6 +34,7 @@ export function createTurnCollector() {
 
 export class NodeApiClient {
   constructor() {
+    report('client.construct', {});
     this.settings = {
       describe: async () => {
         requireOnline();

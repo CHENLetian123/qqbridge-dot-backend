@@ -1,98 +1,92 @@
 # qqbridge-dot-backend
 
-为 QQBridge 的 `reserved2` 仿真群友模式接入 ChatGPT Dot 的实验项目。
+通过 MCP 工具、MCP Events 和 Secure MCP Tunnel，将 ChatGPT Dot 接入 QQBridge / SnowLuma。
 
-**当前版本：`0.1.0-experimental`。已实现固定版本 QQBridge 适配补丁、本地运行队列 API、Node 客户端和组件测试。远程 MCP 服务、MCP Events、运行账本持久化及真实 QQ / Dot 联调仍未完成。**
+当前版本已验证真实 Dot 的事件触发，以及私聊的自动领取、读取、发送和收尾。支持按会话混合使用 Dot / DSH，也支持配置 dot.only=true，让全部显式白名单会话使用 Dot，停止创建 DSH 客户端、探活和事件流。首次接入步骤见 [接入指南](docs/dot-mcp-local.md)。
 
-## 为什么单独建仓库
+## 链路与职责
 
-QQBridge 继续管理 QQ 消息、群聊状态与触发策略；本项目负责 Dot 的事件接入、受限工具和任务回执。这样可以分别跟进 QQBridge 与 ChatGPT MCP 协议的更新。
+QQ 消息 → SnowLuma → QQBridge 的未读队列与唤醒策略 → 本项目的事件网关 → ChatGPT Dot。
 
-独立仓库仍需要对 QQBridge 做版本绑定的适配。当前上游的唤醒、会话与运行结束处理依赖 DSH；仅调用现有 HTTP 接口不足以完整接管 `reserved2`。必要时可用一个 QQBridge fork 承载补丁，但 Dot 的主要逻辑保留在本仓库。
+Dot 收到事件后，通过本项目的 MCP 工具领取回合、读取消息、选择回复或沉默，并显式收尾。QQBridge 保留发送限频、白名单、静默、工具开关和观察策略。
 
-完整决策见 [ADR 0001](docs/decisions/0001-independent-backend.md)，检查过的上游版本与改动边界见 [QQBridge 适配说明](compat/qqbridge/README.md)。
+| 组件 | 职责 |
+| --- | --- |
+| SnowLuma / QQ 客户端 | 接收 QQ 消息、执行 OneBot 发送；本仓库不分发 |
+| 固定基线 QQBridge 适配器 | 会话归属、唤醒合并、运行租约、消息水位、发送校验、观察与潜水 |
+| MCP 网关 | 六个受限工具、事件发现、订阅、签名回调、加密持久化和不确定发送隔离 |
+| ChatGPT Dot | 读取上下文、判断是否回复、调用工具并结束本轮 |
 
-## 职责分工
+Dot 工具调用通过官方私有隧道抵达本机；事件通过经过验证的 HTTPS 回调发送给 ChatGPT。本地服务不调用模型 API，也不代替真实 Dot。
 
-| 部分 | 目标职责 | 初版状态 |
-| --- | --- | --- |
-| 用户现有 SnowLuma / QQ 客户端 | QQ 消息接入与发送 | 不在本项目中分发或配置 |
-| QQBridge `reserved2` | 消息序号、群状态、唤醒合并、观察与潜水策略 | 固定基线补丁已实现；沿用已有唤醒配置 |
-| 本项目本地适配层 | 会话归属、运行租约、已读水位、发送回执、显式收尾 | 已接入真实 QQBridge 入口与 HTTP 路由；账本在内存中 |
-| 本项目 MCP 层 | 按会话受限的 QQ 工具、订阅与事件投递 | 待实现 |
-| ChatGPT Dot | 读取上下文、决定是否发言、调用工具并结束本轮 | 远程接入与真实联调待完成 |
+## 快速开始
 
-目标流程：QQBridge 合并一次唤醒，本项目将事件交给已订阅的 Dot；Dot 通过工具读群聊、选择发言或沉默，最后显式结束这一轮。消息在思考期间继续入库，下一轮处理尚未确认的部分。
+需要 Node.js 24、Git，以及单独安装的 QQBridge / SnowLuma。推荐使用干净的 QQBridge 副本。
 
-## 运行初版
-
-需要 Node.js 24 或更高版本。当前没有第三方运行依赖，不需要 API key。
-
-```sh
+~~~sh
+npm ci
 npm test
 npm run demo
-```
+node scripts/apply-qqbridge-patch.mjs --source ../qq-bridge --check
+node scripts/apply-qqbridge-patch.mjs --source ../qq-bridge
+npm run setup:mcp -- --bridge-config ../qq-bridge/config.json --conversation group:123456789 --conversation private:10001
+~~~
 
-这两条命令只运行本地状态机和模拟场景，不连接网络、不读真实群消息，也不向 QQ 发送内容。`package.json` 的 `private: true` 仅防止误发布到 npm，与 GitHub 仓库可见性无关。
+把 QQBridge 配置指向生成的专用令牌，按需启用纯 Dot 模式，然后运行 npm start。完整配置、隧道、账号和订阅步骤见 [接入指南](docs/dot-mcp-local.md)。安装器锁定 [QQBridge 基线](compat/qqbridge/baseline.json)，不修改配置或会话状态；本地源码有改动时会拒绝覆盖。
 
-## 当前处理约束
+## MCP 工具与事件
 
-- 同一个会话同一时刻只有一个有效运行；重新绑定后，旧代际不能继续写入。
-- 事件已接收与 Dot 已完成是两件事。收到 webhook `2xx` 不能释放整个运行。
-- Dot 读到的消息水位与它确认处理的水位明确区分，思考期间新来的消息不会被整批清掉。
-- 发言和回合结束分别确认。选择沉默也能正常结束，不能依赖“发了一条消息”来清除忙碌状态。
-- 每次发送有稳定的 `sendId`；结果不明时保留不确定状态，不盲目重发。原型不保证外部系统的 exactly-once 发送。
-- 运行租约到期后可以恢复；旧运行迟到的完成请求不能清掉新运行。
+| 工具 | 用途 |
+| --- | --- |
+| qq_get_status | 桥接状态、会话范围、逐会话订阅覆盖、发现和订阅诊断 |
+| qq_list_wakes | 获取待领取唤醒的元数据 |
+| qq_claim_turn | 用稳定 claimId 领取回合，返回不含凭据的上下文和 runId |
+| qq_read_messages | 按水位分页读取当前回合的消息 |
+| qq_send_message | 用稳定 sendId 发送本会话的一条纯文本回复 |
+| qq_finish_turn | 按实际已读水位，以 replied 或 silent 收尾 |
 
-本地 API 使用独立 Bearer 凭据与逐运行凭据，仅允许回环访问。运行队列和发送账本仍保存在进程内；QQBridge 自身的群状态继续按上游方式保存。运行账本重启恢复、持久化对账和跨进程互斥尚未实现。结果不明的发送会阻止新发送及继续确认消息；此版本用于开发联调。
+事件 qq.wake.available 使用精确的 conversationKey 过滤，例如 group:123456789 或 private:10001。事件只含唤醒元数据，消息内容由 Dot 领取后读取。新增会话需要同时更新桥接范围、MCP 范围和 ChatGPT 事件订阅；插件元数据变动后需要在插件管理页刷新。
 
-## 应用 QQBridge 补丁
+## 运行约束
 
-先停止目标 QQBridge，在其固定版本副本上检查并应用。安装器拒绝不匹配的版本、本地源码改动和不同的已有适配模块；不会修改 `config.json` 或 `state/`。
+- 同一会话同时只有一个有效回合；旧代际和过期租约不能继续发送或收尾。
+- webhook 2xx 只表示 ChatGPT 接收事件，不能代替完成回合。
+- 仅读取不代表确认处理；收尾只确认连续、已展示的消息水位，后续新消息继续保留。
+- sendId 与内容绑定，未知发送结果必须核实，不能换新 ID 重发。外部发送不保证 exactly-once。
+- 网关使用 AES-256-GCM 加密的 SQLite 保存订阅、outbox、运行引用和发送预留；密钥侧文件必须一起保管。
+- QQBridge 的运行账本仍在进程内。重启后存在未收尾发送时，网关会锁定会话等待核实，不能简单删库恢复。
+- 本机 HTTP 端点只接受回环 Bearer 请求；隧道 stdio 入口从本机文件读取凭据，stdout 只输出 JSON-RPC。
+- 回调验证和投递要求 HTTPS、公网目的地址、固定实际连接 IP、有效 TLS 和 Standard Webhooks 签名，不跟随重定向。
 
-```sh
-node scripts/apply-qqbridge-patch.mjs --source /path/to/qq-bridge --check
-node scripts/apply-qqbridge-patch.mjs --source /path/to/qq-bridge
-```
+目前 Dot 工具范围是纯文本读取、回复和收尾。DSH 的模型配置、完整对话历史、独立黑话研究以及图片、语音和贴纸工具未迁移为 Dot 工具。纯 Dot 模式会停用旧 DSH 学习任务。
 
-然后按 [本地联调步骤](docs/local-integration.md) 配置专用 token 文件与一个指定会话。当前 API 是本机 QQBridge 与后续 MCP 服务之间的内部接口，不能直接作为 ChatGPT MCP 端点安装。
+## 验证与目录
 
-组件测试会启动真实的已打补丁 QQBridge 主程序，使用本地模拟 QQ / DSH 边界；它不会访问真实 QQ 账号。必须先准备已打补丁的上游目录，再运行：
-
-```sh
+~~~sh
+npm run format:check
+npm test
+npm run demo
 QQBRIDGE_SOURCE_DIR=/absolute/path/to/patched/qq-bridge npm run test:integration
-```
+~~~
 
-PowerShell 中先设置 `$env:QQBRIDGE_SOURCE_DIR`，再执行 `npm run test:integration`。缺少源码或适配模块会直接失败，不会跳过测试。GitHub Actions 已配置离线测试和固定上游组件测试两个 job，执行结果见 [验证记录](docs/verification.md)。
-
-## 目录
+PowerShell 先设置 $env:QQBRIDGE_SOURCE_DIR 再运行集成测试。缺少已打补丁源码时测试会失败，不会跳过。组件测试运行真实 bridge.js，QQ / DSH / 回调服务使用本地替身，不发送真实 QQ 消息。真实账号验证与测试边界见 [验证记录](docs/verification.md)，各提交的 CI 见 [GitHub Actions](https://github.com/UyNewNas/qqbridge-dot-backend/actions/workflows/ci.yml)。
 
 | 路径 | 内容 |
 | --- | --- |
-| `src/lifecycle.mjs` | 离线生命周期核心 |
-| `test/lifecycle.test.mjs` | 水位、租约和回执等行为测试 |
-| `examples/offline-demo.mjs` | 模拟唤醒、读取、发送与收尾 |
-| [src/qqbridge-client.mjs](src/qqbridge-client.mjs) | 本地 API 客户端；不自动重试写操作 |
-| [compat/qqbridge/overlay/src/dot-backend.mjs](compat/qqbridge/overlay/src/dot-backend.mjs) | 安装到 QQBridge 的运行队列与 API |
-| [scripts/apply-qqbridge-patch.mjs](scripts/apply-qqbridge-patch.mjs) | 固定基线检查、补丁应用和失败回滚 |
-| [docs/local-api.md](docs/local-api.md) | 已实现的本地 HTTP 协议 |
-| [contracts/protocol.md](contracts/protocol.md) | 拟定的接入契约与不变量 |
-| [compat/qqbridge/](compat/qqbridge/README.md) | 上游基线、适配位置和兼容性状态 |
-| [docs/roadmap.md](docs/roadmap.md) | 实施顺序与验收标准 |
-| [docs/verification.md](docs/verification.md) | 实际执行的验证与尚未验证的范围 |
+| src/mcp/ | HTTP JSON-RPC、网关、SQLite 存储、回调网络与签名 |
+| src/qqbridge-client.mjs | 受限本地桥接客户端，不自动重试写操作 |
+| src/lifecycle.mjs | 离线生命周期模型与不变量 |
+| scripts/ | 凭据初始化、服务启动、检查、stdio 入口及 Windows 隧道连接 |
+| compat/qqbridge/ | 固定基线补丁、适配模块、许可及版本约束 |
+| launcher/windows/ | 可选的原生管理器，统一管理进程和日志 |
+| test/ | 生命周期、安装器、MCP、网络边界与真实桥接组件测试 |
+| docs/ | 接入、API、验证、设计决策和后续工作 |
 
-## Dot 接入约束
+## 参考与许可
 
-依据 2026-10-25 检查的官方文档，Dot 可通过自定义 MCP 插件订阅 MCP Events。插件需要可访问的 MCP 端点，并完成服务发现、订阅、webhook 验证与签名。事件接收成功后仍是异步处理；文档没有在该协议中提供一条可直接替代 DSH `turn/end` 的完成通知。因此，本项目拟提供应用层收尾工具，并辅以租约恢复。
+- [QQBridge](https://github.com/Derpyu520/qq-bridge) / [适配说明](compat/qqbridge/README.md)
+- [MCP Events](https://developers.openai.com/plugins/build/mcp-events)
+- [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)
+- [自定义 MCP 连接与元数据刷新](https://developers.openai.com/plugins/deploy/connect-chatgpt)
 
-后续实现必须重新核对届时的官方协议与账号能力。这里的应用层工具名、字段和状态机是本项目的设计，不是 OpenAI 或 QQBridge 已有的标准接口。
-
-## 参考
-
-- [QQBridge](https://github.com/Derpyu520/qq-bridge)
-- [已审阅的 QQBridge commit](https://github.com/Derpyu520/qq-bridge/commit/a49877f4e58d04e47532d44b803360d0f001160d)
-- [OpenAI MCP Events](https://developers.openai.com/plugins/build/mcp-events)
-- [连接自定义 MCP 插件](https://developers.openai.com/plugins/deploy/connect-chatgpt)
-- [Dot 持续指令与控制](https://learn.chatgpt.com/docs/dots/controls)
-
-MIT 许可适用于本仓库的原创内容。补丁涉及的 QQBridge 原始许可保存在 [UPSTREAM-LICENSE](compat/qqbridge/UPSTREAM-LICENSE)。本项目与 QQBridge、SnowLuma 或 OpenAI 无官方关联。
+本仓库原创内容使用 MIT 许可，QQBridge 原始许可保存在 [UPSTREAM-LICENSE](compat/qqbridge/UPSTREAM-LICENSE)。本项目与 QQBridge、SnowLuma 或 OpenAI 无官方关联。package.json 的 private=true 只防止误发布到 npm。

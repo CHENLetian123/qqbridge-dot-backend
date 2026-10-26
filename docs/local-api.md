@@ -1,6 +1,6 @@
 # 已实现的本地 API v1
 
-路径前缀：`/api/dot/v1`。本接口运行在 QQBridge 原控制台的回环 HTTP 服务器上，供同机的后续 MCP 服务调用。它不是 MCP 协议端点。
+路径前缀：`/api/dot/v1`。本接口运行在 QQBridge 原控制台的回环 HTTP 服务器上，供同机 MCP 网关调用。它不是 MCP 协议端点。
 
 每次请求均需 `Authorization: Bearer <Dot专用token>`。POST 使用 `Content-Type: application/json`，请求体上限 64 KiB。Host、远端地址及 Origin 必须符合回环访问约束；不接受跨站请求，不启用 CORS。Bearer 不授予控制台管理权限。
 
@@ -8,7 +8,7 @@
 
 | 方法与相对路径 | 请求内容 | 返回与行为 |
 | --- | --- | --- |
-| `GET /health` | 无 | 协议版本、内存存储标记、配置会话数量 |
+| `GET /health` | 无 | 协议版本、内存存储标记、配置会话数量及进程 instanceId；网关用它识别桥接重启 |
 | `GET /wakes` | 无 | 可领取的 `wakes`；不开始运行租约 |
 | `POST /runs/claim` | `wakeId`, `claimId` | `run`, `context`, `readThroughSeq`, 恢复回执；领取时开始租约 |
 | `POST /runs/{runId}/read` | `runToken`, `afterSeq`（默认 0）, `limit`（默认 30） | `messages`, `readThroughSeq`, `unreadCount` |

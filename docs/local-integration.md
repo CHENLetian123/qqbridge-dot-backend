@@ -1,6 +1,6 @@
 # 本地 QQBridge 适配与联调
 
-本阶段提供本机 QQBridge 的后端接口。ChatGPT Dot 的自定义 MCP 插件和 MCP Events 尚未实现，因此应用补丁不会自动让 Dot 加入群聊。
+本补丁提供本机 QQBridge 的后端接口。MCP 网关、隧道和真实 Dot 订阅步骤见 [接入指南](dot-mcp-local.md)；应用补丁本身不会自动创建 ChatGPT 订阅。
 
 ## 1. 准备固定版本副本
 
@@ -30,14 +30,15 @@ node scripts/apply-qqbridge-patch.mjs --source ../qq-bridge-dot-test --check
 node scripts/apply-qqbridge-patch.mjs --source ../qq-bridge-dot-test
 ```
 
-安装器检查 commit（存在 `.git` 时）与 `src/bridge.js` 的 blob SHA，先在临时副本应用补丁，再发布两个文件：
+安装器检查 commit（存在 `.git` 时）与 `src/bridge.js` 的 blob SHA，先在临时副本应用补丁，再发布三个文件：
 
 - `src/bridge.js`
 - `src/dot-backend.mjs`
+- `src/dot-only-policy.mjs`
 
 `--check` 不写目标目录。完整重复安装返回 `already-applied`；不同模块、版本漂移或不完整安装会失败。安装出错时尝试回滚已写文件，回滚失败会报告备份目录。此机制不保证断电或强制终止时的多文件事务原子性。
 
-安装器不修改用户配置和群聊状态。需要撤回时，在停止实例后恢复基线 `src/bridge.js` 并移除本补丁添加的 `src/dot-backend.mjs`；保留自己的配置和状态备份，不要执行整目录清理。
+安装器不修改用户配置和群聊状态。需要撤回时，在停止实例后恢复基线 `src/bridge.js` 并移除本补丁添加的两个 overlay 模块；保留自己的配置和状态备份，不要执行整目录清理。
 
 ## 3. 专用凭据与会话归属
 
@@ -60,9 +61,9 @@ node -e "const fs=require('node:fs');fs.mkdirSync('state',{recursive:true});fs.w
 }
 ```
 
-会话列表在进程启动时确定，变更后重启生效。Dot 会话不会因接口故障自动回退 DSH；其他会话保留原有 DSH 路径。测试时只启动负责该账号的一个桥接实例。
+会话列表在进程启动时确定，变更后重启生效。Dot 会话不会因接口故障自动回退 DSH；其他会话保留原有 DSH 路径。若配置 `dot.only=true`，启动时改为从显式白名单派生全部会话，并关闭 DSH 客户端、探活、模式同步和事件流。测试时只启动负责该账号的一个桥接实例。
 
-当前仅支持 `reserved2` / `simulation` 模式。已有控制台可以设置模式；在 DSH 离线时启动，需要本地 `state/mode.json` 已保存：
+当前仅支持 `reserved2` / `simulation` 模式。纯 Dot 模式固定使用此流程；混合模式在 DSH 离线时启动，需要本地 `state/mode.json` 已保存：
 
 ```json
 {"mode":"reserved2"}

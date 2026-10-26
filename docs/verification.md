@@ -1,63 +1,45 @@
-# QQBridge 适配验证记录
+# 验证记录与边界
 
-- 日期：2026-10-25
-- 本地环境：Node.js v24.22.1，Linux
-- 适配基线：`Derpyu520/qq-bridge`，提交 `a49877f4e58d04e47532d44b803360d0f001160d`
-- 本仓库运行和测试代码使用 Node.js 标准库；组件集成测试通过明确的替身隔离外部 SDK、DSH 和 QQ 服务。
+## 环境
 
-本记录区分本地单元测试、真实 QQBridge 源码的组件集成测试和真实服务联调。下表记录本轮已实际执行的本地验证；每个提交的远端验证以 [GitHub Actions](https://github.com/UyNewNas/qqbridge-dot-backend/actions/workflows/ci.yml) 为准。
+- 日期：2026-10-26。
+- 本轮本地：Windows，Node.js 24；原有 Linux 记录与每次远端执行结果以 [GitHub Actions](https://github.com/UyNewNas/qqbridge-dot-backend/actions/workflows/ci.yml) 为准。
+- 固定 QQBridge 基线：Derpyu520/qq-bridge@a49877f4e58d04e47532d44b803360d0f001160d。
 
-## 本轮执行结果
+## 可重复执行的验证
 
-| 验证项 | 命令或操作 | 结果 |
+本轮整理后已在 Windows / Node.js v24.15.0 执行：53 项单元测试、7 项固定基线组件集成测试全部通过；干净基线的补丁预检、安装与重复安装通过；离线示例和原生管理器自检通过。
+
+| 检查 | 入口 | 覆盖 |
 | --- | --- | --- |
-| 离线单元测试 | `npm test` | **PASS：33 tests / 33 pass / 0 fail / 0 skipped** |
-| 补丁预检 | `node scripts/apply-qqbridge-patch.mjs --source "$QQBRIDGE_SOURCE_DIR" --check` | **PASS**：在固定基线源码上完成预检 |
-| 实际补丁安装 | `node scripts/apply-qqbridge-patch.mjs --source "$QQBRIDGE_SOURCE_DIR"` | **PASS**：完成补丁及 overlay 安装 |
-| 同版本重复安装 | 再次执行上述安装命令 | **PASS**：明确返回 `already-applied` |
-| 离线演示最终复跑 | `npm run demo` | **PASS**：新消息保留、沉默收尾和迟到完成拒绝均正常 |
-| QQBridge 组件集成 | 设置指向已安装补丁源码的绝对路径 `QQBRIDGE_SOURCE_DIR`，执行 `npm run test:integration` | **PASS：5 tests / 5 pass / 0 fail / 0 skipped** |
-| GitHub Actions | `offline` 和 `qqbridge-integration` 两个 job | 工作流已配置；具体提交结果见上方 Actions 链接 |
+| 格式 | npm run format:check | 新增 MCP 运行代码、入口与测试 |
+| 单元和安装器 | npm test | 租约、水位、幂等、权限、加密状态、回调地址、元数据诊断、安装回滚 |
+| 离线示例 | npm run demo | 新消息保留、沉默与迟到完成拒绝 |
+| 固定基线安装 | patch:check / patch:apply / 重复 apply | 干净基线、overlay 安装、重复安装识别 |
+| 组件集成 | QQBRIDGE_SOURCE_DIR 指向已适配源码后运行 npm run test:integration | 真实 bridge.js、HTTP MCP、签名 Events、领取/读取/发送/收尾、未知发送、纯 Dot 无 DSH 调用 |
+| Windows 管理器 | --self-test | 隐藏进程、UTF-8 输出、退出码、停止和子进程树清理 |
 
-本轮最终补丁安装和组件测试目标为本地 `qqbridge-integration-final` 副本，不写用户的 QQBridge 配置或状态。安装后的两个生产文件已与交付源码逐字比对一致，Git blob 摘要记录于 [baseline.json](../compat/qqbridge/baseline.json)。最终集成测试必须使用已安装补丁和 overlay 的源码目录；缺失 `QQBRIDGE_SOURCE_DIR`、缺失源码或未应用补丁都会使测试失败，不会以跳过代替验证。
+组件测试隔离了真实 QQ、SnowLuma SDK、DSH 和 webhook 接收端，运行真实 QQBridge 入口及本地模块。缺少源码或补丁会失败，不会跳过。HTTP MCP 同时经过官方 MCP SDK 客户端互操作验证；stdio 入口也有协议转发测试。
 
-`npm test` 显式运行 `test/*.test.mjs`，使用 Node 内置测试运行器及 `--test-isolation=none`。它不包含需要源码目录和本地监听端口的集成测试。
+CI 在 Linux / Windows 运行单元测试，在 Linux 的固定上游源码上执行安装器预检、实际安装、重复安装和组件集成，并在 Windows 构建管理器和运行进程生命周期自检。具体提交是否通过以对应 CI 记录为准。
 
-## 已通过的 33 项单元测试
+## 已完成的真实账号联调
 
-| 测试文件 | 数量 | 核实的行为 |
-| --- | ---: | --- |
-| `test/lifecycle.test.mjs` | 11 | 单会话单运行；事件确认与运行完成分离；代际和租约隔离；显式连续已读水位；思考期间的新消息保留；发送预留、幂等及未知结果；明确的回复或沉默完成；旧完成回执不能清除新运行 |
-| `test/dot-backend.test.mjs` | 12 | 排队不消耗运行租约；领取重试和恢复回执；分页不能越过未读消息；完成重放；过期与实际发送前的校验；并发发送去重；未知发送阻止换 ID 重发或成功完成；同步失败收束；沉默后等待宿主观察条件；运行和传输凭据不能作为 QQ 文本发出；被中断的运行和零未读观察状态可以恢复 |
-| `test/patch-installer.test.mjs` | 8 | 只读预检和重复安装；源码漂移；缺失或不适用的补丁；overlay 冲突与不完整安装；越界补丁拒绝；写入故障回滚；符号链接和安装锁；Git checkout 提交不匹配 |
-| `test/qqbridge-client.test.mjs` | 2 | 凭据只发送到允许的 loopback 目标并拒绝重定向；不静默重试不确定发送，不替换调用者的幂等键 |
+以下记录来自一套实际 SnowLuma + QQBridge + ChatGPT Dot 环境，账号、群号、密钥、回调地址和原始日志不进入仓库：
 
-这些测试验证当前进程内的协议和失败处理，不证明跨进程互斥、重启恢复或外部发送 exactly-once。
+1. 私有 Secure MCP Tunnel 已发现六个工具和 qq.wake.available。
+2. 群事件通过签名回调被接受，用户确认该事件实际触发 Dot 处理。
+3. Dot 已通过同一私聊 wakeId 领取、读取、发送并显式收尾，发送状态 confirmed、finished=true。
+4. 更新事件范围并刷新插件后，群聊和私聊的两条精确订阅均生效，没有重复建任务。
+5. 新私聊自动生成事件，首次投递成功；Dot 自动领取，QQ 发送成功一条，并完成收尾。该轮从收到消息到确认发送约 59 秒，不作为延迟承诺。
+6. 切为纯 Dot 后，DSH 端口停止监听；QQBridge 报告 backend=dot，QQ 在线，隧道正常。
 
-## 组件集成测试的边界
+真实联调使用的是保留用户其他本地改动的 QQBridge 安装。固定基线补丁另行通过组件测试；本记录不声明其他 QQBridge 版本、账号、网络环境或未迁移工具已兼容。
 
-集成 harness 复制并启动**实际打过补丁的上游 `src/bridge.js` 及其本地模块**，运行真实 HTTP 路由、认证、QQBridge 状态机和 Dot overlay。Node.js 24 的 loader 仅替换 `@snowluma/sdk`、`js-yaml` 和 `dsh-client.js`。OneBot 目标是本地测试 HTTP 服务，可以记录发送和模拟服务已经收到消息、响应却丢失的情况。
+## 尚未验证或未实现
 
-已通过的 5 项组件测试覆盖以下场景：
-
-1. DSH 离线时，Dot 会话能够合并唤醒、发送、保留处理中新增消息、沉默收尾；另一个由 DSH 托管的群继续使用原分支。
-2. 真实路由上的认证、跨站访问、跨会话访问、DSH 旧工具入口及暂停状态不能绕过权限。
-3. 租约过期产生替代运行后，迟到的完成请求不能清除新运行。
-4. OneBot 已收到消息但回执丢失时，发送成为未知结果，重复调用不会再次派发。
-5. 切出再进入 `reserved2`、暂停再恢复时，旧运行失效，新运行无需新消息即可唤醒；沉默完成后的观察状态在零未读、无限潜水、没有睡眠定时器且关闭主动检查时也能恢复。
-
-这些测试没有连接真实 QQ、NapCat 或 ChatGPT Dot，也没有启动 MCP 服务。HTTP 和宿主状态机真实运行，不等于外部服务端到端联调完成。潜水前观察使用宿主的真实判断入口；其真实群聊时序和原版行为兼容仍需后续联调确认。
-
-## CI 配置与真实服务待验证项
-
-工作流已配置两个独立 job：离线 job 使用 Node.js 24 执行 `npm test` 和 `npm run demo`；组件集成 job 检出上述固定 QQBridge 提交，依次执行补丁预检、安装、重复安装，再以绝对路径 `QQBRIDGE_SOURCE_DIR` 执行 `npm run test:integration`。Actions 使用固定完整提交 SHA。组件测试通过 loader 隔离外部依赖，不安装或启动真实 QQBridge 外部服务。
-
-CI 的执行结果按提交记录在 Actions 中；它与以上本地记录覆盖相同层次的验证。仍未完成的能力和验证包括：
-
-- 真实 QQ 发送、真实 Dot 调度及二者的端到端联调。
-- 远程 MCP 服务、MCP 认证、订阅及 MCP Events 投递；本仓库的本地 HTTP 契约不是 MCP 实现。
-- 运行、领取、发送和完成回执的持久化，跨进程互斥及进程重启后的恢复。
-- 真实群聊中的观察期、模式切换及长期定时行为兼容验证。
-- 其他 QQBridge 提交或发行版的兼容性；当前补丁安装器只接受明确校验过的固定基线。
-
-未知发送保持为待核实状态，不自动重发；当前没有面向真实外部服务的发送结果核实流程。进程内测试通过不能推出外部 exactly-once 保证。
+- 所有故障场景下的真实平台重投和账号撤销行为；当前以组件测试覆盖相关边界。
+- 多机器、多进程或多用户部署；当前为单机私有连接。
+- QQBridge 内存运行账本的完整重启恢复；网关只保留可核实引用和不确定发送隔离。
+- Dot 图片、语音、贴纸工具，以及 DSH 对话历史和独立研究任务迁移。
+- 对外部 QQ 发送提供 exactly-once 保证。

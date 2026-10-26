@@ -44,7 +44,10 @@ async function directory(path, missingCode) {
 
 async function git(args, cwd) {
   try {
-    return (await exec('git', args, { cwd, env: gitEnv, timeout: 10_000, maxBuffer: 2 * 1024 * 1024 })).stdout;
+    // Temporary staging directories do not inherit the source checkout's Git
+    // settings. Preserve exact baseline bytes even on Windows installations
+    // whose global core.autocrlf is true.
+    return (await exec('git', ['-c', 'core.autocrlf=false', ...args], { cwd, env: gitEnv, timeout: 10_000, maxBuffer: 2 * 1024 * 1024 })).stdout;
   } catch (error) {
     if (error.code === 'ENOENT') fail('GIT_REQUIRED', 'Install Git before using the patch installer.', error);
     throw error;

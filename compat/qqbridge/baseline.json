@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "reviewed_at": "2026-10-25",
-  "status": "component-tested",
+  "reviewed_at": "2026-10-26",
+  "status": "component-tested-with-live-local-variant",
   "compatibility_verified": false,
   "patch_status": "implemented-experimental",
   "patch_available": true,
-  "runtime_scope": "patched-qqbridge-with-mocked-external-services",
+  "runtime_scope": "pinned-bridge-component-tests-and-local-live-dot-verification",
   "upstream": {
     "repository": "Derpyu520/qq-bridge",
     "url": "https://github.com/Derpyu520/qq-bridge",
@@ -27,25 +27,43 @@
   ],
   "integration": {
     "qqbridge_adapter": "component-tested",
-    "remote_mcp": "not-implemented",
-    "mcp_events": "not-implemented",
-    "live_qq_dot_verification": "not-performed"
+    "remote_mcp": "http-and-stdio-tested",
+    "mcp_events": "component-and-live-event-tested",
+    "live_qq_dot_verification": "private-automatic-round-trip-on-local-variant"
   },
   "verification": {
-    "unit_tests": { "passed": 33, "failed": 0, "skipped": 0 },
-    "component_tests": { "passed": 5, "failed": 0, "skipped": 0 },
+    "unit_tests": {
+      "passed": 53,
+      "failed": 0,
+      "skipped": 0
+    },
+    "component_tests": {
+      "passed": 7,
+      "failed": 0,
+      "skipped": 0
+    },
     "installer": "check-apply-reapply-passed",
     "offline_demo": "passed",
     "patched_files": [
-      { "path": "src/bridge.js", "blob_sha": "fe7c5bfcc0264032064c9d8c5717868bb32adaa2" },
-      { "path": "src/dot-backend.mjs", "blob_sha": "4f699d161fa88d809a7fdcc6b142be878441c4ed" }
+      {
+        "path": "src/bridge.js",
+        "blob_sha": "3fbf114e7af76f76a70559e3a90d91927ffff87c"
+      },
+      {
+        "path": "src/dot-backend.mjs",
+        "blob_sha": "9581126855bf1f8a0799aebc66cfa382162824a6"
+      },
+      {
+        "path": "src/dot-only-policy.mjs",
+        "blob_sha": "45eb2636df0215b3eb90fa9fcee567c977299563"
+      }
     ]
   },
   "notes": [
-    "固定基线的补丁、安装器和组件测试已实现；compatibility_verified=false 表示尚未完成真实 QQ / Dot 联调验收。",
-    "组件测试运行真实补丁源码和本地 HTTP，通过替身隔离 QQ、SnowLuma SDK、DSH 和 YAML 外部依赖。",
-    "本基线不声明支持任何其他 commit 或发行版。",
-    "文件 blob SHA 与仓库 commit 是不同标识。",
-    "源码行号仅供定位，不能作为补丁或兼容性校验依据。"
+    "安装器只支持此固定 commit；compatibility_verified=false 表示不对其他版本或环境作兼容承诺。",
+    "固定基线组件测试运行真实桥接源码，外部 QQ、DSH 和回调通过本地替身隔离。",
+    "另在保留用户本地改动的安装上验证真实 Dot 群事件和私聊自动领取、读取、回复、收尾。",
+    "桥接运行账本仍为内存状态；网关持久化订阅、outbox 和发送预留，未知发送需要核实。",
+    "文件 blob SHA 与仓库 commit 是不同标识；源码行号仅供定位。"
   ]
 }

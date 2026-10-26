@@ -1,15 +1,17 @@
 diff --git a/src/bridge.js b/src/bridge.js
+index 9340068..3fbf114 100644
 --- a/src/bridge.js
 +++ b/src/bridge.js
-@@ -29,6 +29,7 @@
+@@ -29,6 +29,8 @@ import { hardenDir, manualDirCommand } from './state-acl.mjs';
  import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
  import { resolvePriceTable } from './model-prices.js';
  import { createTokenLedger } from './token-ledger.js';
 +import { createDotBackend } from './dot-backend.mjs';
++import { applyDotOnlyPolicy, createDisabledDshClient } from './dot-only-policy.mjs';
  import {
    loadSlang,
    saveSlang,
-@@ -656,6 +657,8 @@
+@@ -656,6 +658,8 @@ function loadConfig() {
    const file = readJsonSafe(p, null, true);
    if (!file || typeof file !== 'object' || Array.isArray(file)) throw new Error(`配置格式错误：${p}`);
    const cfg = {
@@ -18,10 +20,20 @@ diff --git a/src/bridge.js b/src/bridge.js
      dsh: {
        baseUrl: 'http://127.0.0.1:3080',
        provider: 'deepseek-official',
-@@ -1384,6 +1387,19 @@
+@@ -983,7 +987,7 @@ function loadConfig() {
+   // 离线铸造会话 Cookie（见 dsh-client 的 mintBrowserSessionCookie）。
+   // authTokenExplicit 记录「token 是用户填的还是这里猜的」，客户端据此排优先级。
+   cfg.dsh.authTokenExplicit = Boolean(cfg.dsh.authToken);
+-  if (!cfg.dsh.authToken) cfg.dsh.authToken = discoverDshLaunchToken();
++  if (cfg.dot.only !== true && !cfg.dsh.authToken) cfg.dsh.authToken = discoverDshLaunchToken();
+ 
+   // 思考强度可能被手工改成非法值（config.json 是用户可编辑的）。DeepSeek 适配器对非法值
+   // 会硬拒绝，若直接透传会让每个会话的 selectModel 每次都失败；这里统一规范化并告警。
+@@ -1384,6 +1388,20 @@ let stateDirHardened = null;
  // ── 主流程 ──────────────────────────────────────────────────────────────────
  async function main() {
    const cfg = loadConfig();
++  const dotOnly = applyDotOnlyPolicy(cfg);
 +  const dotEpoch = crypto.randomUUID();
 +  const dotConversationKeys = new Set((Array.isArray(cfg.dot.conversations) ? cfg.dot.conversations : [])
 +    .map((key) => canonicalV2Key(key)).filter(Boolean));
@@ -38,7 +50,16 @@ diff --git a/src/bridge.js b/src/bridge.js
    fs.mkdirSync(STATE_DIR, { recursive: true });
    hardenStateDirAcl();
    acquireLock();
-@@ -2422,7 +2438,9 @@
+@@ -2366,7 +2384,7 @@ async function main() {
+   }
+ 
+   // DSH 侧
+-  const api = new NodeApiClient(cfg.dsh.baseUrl, undefined, {
++  const api = dotOnly ? createDisabledDshClient() : new NodeApiClient(cfg.dsh.baseUrl, undefined, {
+     token: cfg.dsh.authToken,
+     // true=用户在 config.json 里显式填的；false=从日志猜的。猜来的不优先于离线铸造。
+     tokenExplicit: cfg.dsh.authTokenExplicit === true,
+@@ -2422,7 +2440,9 @@ async function main() {
    const reverse = new Map(); // sessionId -> conv key
    for (const [key, sessionId] of Object.entries(state.sessions)) reverse.set(sessionId, key);
    // 新版 DSH 事件流需要显式 follow；启动时为已持久化的 QQ 会话补上。
@@ -49,19 +70,19 @@ diff --git a/src/bridge.js b/src/bridge.js
    const sessionPromises = new Map(); // key -> create promise（防并发重复创建）
    const promptQueues = new Map(); // key -> { queue: [], running: false }：每个 QQ 会话串行投递 DSH prompt，保证 turn 顺序
  
-@@ -2563,7 +2581,10 @@
+@@ -2563,7 +2583,10 @@ async function main() {
    let dshReady = false;
    let dshCheckStarted = false;
    let snowlumaWatchStarted = false; // SnowLuma 上游健康探测只启动一次（见 startSnowlumaWatch）
 -  let currentMode = 'chat'; // chat | closed-agent | reserved（仿真模式，由 DSH settings / state/mode.json 驱动）
 +  // Dot must not depend on a successful DSH probe to recover reserved2 mode.
-+  let currentMode = cfg.dot.enabled === true
++  let currentMode = dotOnly ? 'reserved2' : cfg.dot.enabled === true
 +    ? (normalizeModeInput(readJsonSafe(path.join(STATE_DIR, 'mode.json'), null)?.mode) || 'chat')
 +    : 'chat'; // chat | closed-agent | reserved | reserved2
    let lastMode = currentMode;
    // closed-agent 模式使用的 DSH agent preset：留空表示「用 DSH 自己声明的默认 preset」。
    // 旧版本这里硬编码 'router-standard'，但 DSH 0.1.5 已移除该 preset，硬编码会导致
-@@ -2716,10 +2737,12 @@
+@@ -2716,10 +2739,12 @@ async function main() {
    }
  
    function sessionPolicy(key) {
@@ -74,7 +95,7 @@ diff --git a/src/bridge.js b/src/bridge.js
      return isSessionAllowedInCurrentMode(key) && state.sessions[key] === sessionId
        && state.sessionPolicies[key] === sessionPolicy(key);
    }
-@@ -2749,6 +2772,7 @@
+@@ -2749,6 +2774,7 @@ async function main() {
     * 限流时间戳会一直留在内存里。所有撤销会话映射的路径都必须调用这里。
     */
    function forgetConversationCaches(key) {
@@ -82,7 +103,7 @@ diff --git a/src/bridge.js b/src/bridge.js
      lastSendFailed.delete(key);
      activeWaits.delete(key);
      queuedHintAt.delete(key);
-@@ -2803,6 +2827,12 @@
+@@ -2803,6 +2829,12 @@ async function main() {
    }
  
    function reconcileSessionPolicies() {
@@ -95,7 +116,7 @@ diff --git a/src/bridge.js b/src/bridge.js
      // DSH preset 清单未知时**绝不能**做退役判定。
      //
      // 为什么：`sessionPolicy()` 包含 `modePreset()` 的结果，而 `modePreset()` 依赖
-@@ -2830,6 +2860,7 @@
+@@ -2830,6 +2862,7 @@ async function main() {
        const entries = [...queued.entries()];
        queued.clear();
        for (const [key, items] of entries) {
@@ -103,7 +124,7 @@ diff --git a/src/bridge.js b/src/bridge.js
          let sent = 0;
          let failed = 0;
          for (let i = 0; i < items.length; i++) {
-@@ -2911,6 +2942,7 @@
+@@ -2911,6 +2944,7 @@ async function main() {
              setupSleepTimerV2(key);
              scheduleProactiveCheckV2(key);
            }
@@ -111,7 +132,7 @@ diff --git a/src/bridge.js b/src/bridge.js
            log('桥接模式已确定为 reserved2，恢复有限睡眠定时器');
          }
          try { await flushQueue(); } catch (error) { log('补投队列异常:', error?.message ?? error); }
-@@ -2931,6 +2963,7 @@
+@@ -2931,6 +2965,7 @@ async function main() {
              setupSleepTimerV2(key);
              scheduleProactiveCheckV2(key);
            }
@@ -119,7 +140,15 @@ diff --git a/src/bridge.js b/src/bridge.js
            log('桥接模式已进入二代仿真模式，重建有限睡眠定时器');
          }
          log(`桥接模式已切换为: ${currentMode}`);
-@@ -3259,6 +3292,12 @@
+@@ -2942,6 +2977,7 @@ async function main() {
+     }
+   };
+   function startDshWatch() {
++    if (dotOnly) return;
+     if (dshCheckStarted) return;
+     dshCheckStarted = true;
+     checkDsh();
+@@ -3259,6 +3295,12 @@ async function main() {
          sendJson({ ok: false, error: `Host 头不被允许（${hostHeader || '缺失'}）：控制台只接受本机回环访问` }, 403);
          return;
        }
@@ -132,11 +161,10 @@ diff --git a/src/bridge.js b/src/bridge.js
        // 控制台鉴权：所有请求需带 x-console-token 或 ?token=
        // 定长比较：`!==` 会在第一个不同的字符处短路，理论上可被本机进程用响应时延逐字节试探。
        // 令牌是 192 bit 随机值且只监听回环，所以这是纵深防御而非在野漏洞。
-@@ -3278,6 +3317,23 @@
-           sendJson({ ok: false, error: '未授权：请提供控制台访问令牌' }, 401);
+@@ -3279,6 +3321,23 @@ async function main() {
          }
          return;
-+      }
+       }
 +      // Dot's persisted legacy token exists only for the fixed internal send
 +      // operation. It must not authorize any legacy read/ack/mutation endpoint,
 +      // even when x-agent-call is omitted by a caller holding console access.
@@ -153,10 +181,48 @@ diff --git a/src/bridge.js b/src/bridge.js
 +          sendJson({ ok: false, error: error?.message || 'Dot run 身份无效' }, Number(error?.statusCode) || 403);
 +          return;
 +        }
-       }
++      }
        // 智能体调用隔离（集中关卡）。
        //
-@@ -3509,6 +3565,7 @@
+       // 背景：控制台令牌是「管理端全权」，会话令牌是「只能动自己这个会话」。MCP 工具进程
+@@ -3428,6 +3487,7 @@ async function main() {
+               role: rs.role ?? null,
+               roleMode: rs.mode ?? 'active',
+               dshReady,
++              backend: dotOnly ? 'dot' : 'mixed',
+               socialV2Paused: socialV2.paused,
+             });
+             return;
+@@ -3438,6 +3498,8 @@ async function main() {
+             role: rs.role ?? null,
+             roleMode: rs.mode ?? 'active',
+             dshReady,
++            backend: dotOnly ? 'dot' : 'mixed',
++            dotConversations: [...dotConversationKeys],
+             ownerQQ: cfg.ownerQQ ?? null,
+             allowGroups: cfg.allow?.groups ?? [],
+             allowPrivate: cfg.allow?.private ?? [],
+@@ -3462,6 +3524,10 @@ async function main() {
+           const body = await readBody();
+           // 规范名与历史名都接受，落盘的始终是内部拼写（见 MODE_INPUT_ALIASES）。
+           const requestedMode = normalizeModeInput(body.mode);
++          if (dotOnly && requestedMode !== 'reserved2') {
++            sendJson({ ok:false, error:'纯 Dot 后端固定使用二代消息流程，请在 ChatGPT 中管理 Dot。' },409);
++            return;
++          }
+           if (!requestedMode) {
+             sendJson({ ok: false, error: `mode 必须是 ${VALID_MODES.join(' / ')}（simulation 为 reserved2 的规范名）` }, 400);
+             return;
+@@ -3482,7 +3548,7 @@ async function main() {
+           // 写穿的是**内部拼写**（`simulation` 会写成 `reserved2`）：DSH 里那份值会被 refreshMode
+           // 读回来当 `currentMode` 用，存规范名会让下游那些 `=== 'reserved2'` 判断失效。
+           let dshSynced = false;
+-          try {
++          if (!dotOnly) try {
+             // unwrap() 在 result.ok 为 false 时直接抛错，所以能执行到下一行即代表写穿已成功
+             // （不要在这里再判断 updated?.ok —— 解包后的值恒为真，那样的分支是死代码）。
+             unwrap(await api.settings.update({ ns: 'qq-mode', patch: { mode: requestedMode } }), 'settings.update');
+@@ -3509,6 +3575,7 @@ async function main() {
                setupSleepTimerV2(key);
                scheduleProactiveCheckV2(key);
              }
@@ -164,7 +230,7 @@ diff --git a/src/bridge.js b/src/bridge.js
              log('控制台：模式进入二代仿真模式，重建有限睡眠定时器');
            }
            log(`控制台：模式已设置为 ${requestedMode}${next.closedAgentPreset ? `（closed-agent preset: ${next.closedAgentPreset}）` : ''}${dshSynced ? '' : ' [仅本地，DSH 未同步]'}`);
-@@ -4071,6 +4128,7 @@
+@@ -4071,6 +4138,7 @@ async function main() {
            cfg.deny = { private: deny.private, groups: deny.groups };
            cfg.ownerQQ = ownerQQ;
            reconcileSessionPolicies();
@@ -172,7 +238,7 @@ diff --git a/src/bridge.js b/src/bridge.js
            log(`控制台：白名单已更新（群: ${allow.groups.join(',') || '无'}，私聊: ${allow.private.join(',') || '无'}，管理员: ${ownerQQ ?? '未设置'}）`);
            sendJson({ ok: true, allow, deny, ownerQQ });
            return;
-@@ -4545,6 +4603,10 @@
+@@ -4545,6 +4613,10 @@ async function main() {
            file.socialV2 = merged;
            atomicWriteJson(configFile, file);
            cfg.socialV2 = { ...(cfg.socialV2 ?? {}), ...merged };
@@ -183,7 +249,7 @@ diff --git a/src/bridge.js b/src/bridge.js
            // 仅当“会影响默认唤醒配置”的字段变化时，才同步到仍使用默认配置的现有会话。
            // 避免只改发送/等待/工具开关时，意外重置正在等待的潜水/唤醒计划。
            const WAKE_DEFAULT_KEYS = [
-@@ -4557,6 +4619,9 @@
+@@ -4557,6 +4629,9 @@ async function main() {
            const wakeDefaultChanged = body.wake && typeof body.wake === 'object' &&
              WAKE_DEFAULT_KEYS.some((k) => Object.prototype.hasOwnProperty.call(body.wake, k));
            if (wakeDefaultChanged) refreshAllDefaultWakeConfigsV2();
@@ -193,7 +259,7 @@ diff --git a/src/bridge.js b/src/bridge.js
            log('控制台：二代仿真配置已更新');
            sendJson({ ok: true, config: cfg.socialV2 });
            return;
-@@ -4575,9 +4640,10 @@
+@@ -4575,9 +4650,10 @@ async function main() {
            } else {
              log('控制台：二代 AI 已恢复');
              for (const key of socialV2.conversations.keys()) {
@@ -207,7 +273,7 @@ diff --git a/src/bridge.js b/src/bridge.js
            }
            saveSocialV2State();
            sendJson({ ok: true, paused: socialV2.paused });
-@@ -5199,6 +5265,13 @@
+@@ -5199,6 +5275,13 @@ async function main() {
          if (req.method === 'POST' && url.pathname === '/api/socialV2/send-message') {
            const body = await readBody();
            const key = String(body.key ?? '').trim();
@@ -221,7 +287,7 @@ diff --git a/src/bridge.js b/src/bridge.js
            let rawMessages = body.messages;
            if (typeof rawMessages === 'string') {
              const trimmed = rawMessages.trim();
-@@ -5314,7 +5387,7 @@
+@@ -5314,7 +5397,7 @@ async function main() {
              actualReplyToMessageId = resolved.messageId;
            }
            try {
@@ -230,7 +296,7 @@ diff --git a/src/bridge.js b/src/bridge.js
              recordSentMessagesV2(key, sentMessages);
              st.lastAiReplyAt = now;
              st.lastActionAt = now;
-@@ -5341,7 +5414,7 @@
+@@ -5341,7 +5424,7 @@ async function main() {
              }
              if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
              saveSocialV2State();
@@ -239,7 +305,7 @@ diff --git a/src/bridge.js b/src/bridge.js
            }
            return;
          }
-@@ -7045,6 +7118,11 @@
+@@ -7045,6 +7128,11 @@ async function main() {
          if (req.method === 'POST' && url.pathname === '/api/session/reset') {
            const body = await readBody();
            const key = String(body.key ?? '');
@@ -251,7 +317,7 @@ diff --git a/src/bridge.js b/src/bridge.js
            if (!key || !state.sessions[key]) { sendJson({ ok: false, error: '会话不存在' }, 404); return; }
            sessionEpoch++;
            const oldSessionId = state.sessions[key];
-@@ -7100,6 +7178,8 @@
+@@ -7100,6 +7188,8 @@ async function main() {
          }
          if (req.method === 'POST' && url.pathname === '/api/workspace/reset') {
            sessionEpoch++;
@@ -260,7 +326,7 @@ diff --git a/src/bridge.js b/src/bridge.js
            let archivedCount = 0;
            let stoppedCount = 0;
            try {
-@@ -7184,6 +7264,29 @@
+@@ -7184,6 +7274,29 @@ async function main() {
          sendJson({ ok: false, error: error?.message ?? String(error) }, status);
        }
      });
@@ -290,7 +356,7 @@ diff --git a/src/bridge.js b/src/bridge.js
      server.listen(port, '127.0.0.1', () => {
        log(`本地控制台已启动：http://127.0.0.1:${port}`);
      });
-@@ -7220,8 +7323,8 @@
+@@ -7220,8 +7333,8 @@ async function main() {
    // 更新 lastAiReplyAt / 活跃调度，实际群里什么都没收到，而且只有一行滚动日志能看出问题。
    const lastSendFailed = new Map(); // key -> true（下一次成功即清除）
  
@@ -301,7 +367,7 @@ diff --git a/src/bridge.js b/src/bridge.js
      const safeMsg = redactKnownTokensOnly(msg);
      const [kind, id] = key.split(':');
      const parts = splitForQQ(safeMsg);
-@@ -7990,8 +8093,8 @@
+@@ -7990,8 +8103,8 @@ async function main() {
      return delays;
    }
  
@@ -312,7 +378,7 @@ diff --git a/src/bridge.js b/src/bridge.js
      const [kind, id] = key.split(':');
      const sent = [];
      const failed = [];
-@@ -7999,15 +8102,18 @@
+@@ -7999,15 +8112,18 @@ async function main() {
        const msg = messages[i];
        const useReply = i === 0 ? replyToMessageId : null;
        const useAt = i === 0 ? atUserId : null;
@@ -332,7 +398,7 @@ diff --git a/src/bridge.js b/src/bridge.js
          });
        if (i < delays.length) {
          const d = delays[i];
-@@ -8016,8 +8122,9 @@
+@@ -8016,8 +8132,9 @@ async function main() {
      }
      return sendChain.then(() => {
        if (failed.length > 0) {
@@ -343,7 +409,7 @@ diff --git a/src/bridge.js b/src/bridge.js
          throw err;
        }
        return sent;
-@@ -8033,10 +8140,13 @@
+@@ -8033,10 +8150,13 @@ async function main() {
    }
  
    // 入队校验无法约束排队等待期间的权限变化，每条消息临近实际发送时再次校验。
@@ -358,7 +424,7 @@ diff --git a/src/bridge.js b/src/bridge.js
        if (!isSessionAllowedInCurrentMode(key) || policy !== sessionPolicy(key)
            || (sessionId && state.sessions[key] !== sessionId)) {
          throw new Error('发送已取消：会话、模式或白名单已变化');
-@@ -8101,6 +8211,7 @@
+@@ -8101,6 +8221,7 @@ async function main() {
    }
  
    async function ensureSession(key) {
@@ -366,7 +432,7 @@ diff --git a/src/bridge.js b/src/bridge.js
      const epoch = sessionEpoch;
      const policy = sessionPolicy(key);
      if (!isSessionAllowedInCurrentMode(key)) throw new Error(`当前模式不允许会话 ${key}`);
-@@ -8904,6 +9015,211 @@
+@@ -8904,6 +9025,211 @@ async function main() {
    // 操作者预写的会话初始提示词（与控制台入口同样在 main() 里；损坏时只读降级，不阻塞启动）。
    loadInitialPrompts();
  
@@ -578,7 +644,7 @@ diff --git a/src/bridge.js b/src/bridge.js
    function isSocialEnabled() {
      return currentMode === 'reserved' && cfg.social?.enabled !== false;
    }
-@@ -9109,6 +9425,7 @@
+@@ -9109,6 +9435,7 @@ async function main() {
  
    // 实际的 DSH prompt 投递（不再直接对外暴露，统一走 promptQueues 串行队列）。
    async function deliverPromptNow(key, promptText, opts = {}) {
@@ -586,7 +652,7 @@ diff --git a/src/bridge.js b/src/bridge.js
      if (!isSessionAllowedInCurrentMode(key)) throw new Error(`当前模式不允许会话 ${key}`);
      // Recheck queued wakes at dispatch time: no model call while paused/disabled
      // and no reserved2 prompt leaking into an ordinary chat after a mode switch.
-@@ -9195,6 +9512,7 @@
+@@ -9195,6 +9522,7 @@ async function main() {
    // 每个 QQ 会话串行投递 DSH prompt，保证 turn 完成顺序与提交顺序一致，
    // 从而让 [SILENT]、摘要静默、退场标记都能准确匹配到自己的 turn。
    function deliverPrompt(key, promptText, opts = {}) {
@@ -594,7 +660,7 @@ diff --git a/src/bridge.js b/src/bridge.js
      return new Promise((resolve, reject) => {
        let entry = promptQueues.get(key);
        if (!entry) {
-@@ -9865,6 +10183,7 @@
+@@ -9865,6 +10193,7 @@ async function main() {
        if (topicHit || participantHit) t.lastMentionAt = Date.now();
      }
      saveSocialV2State();
@@ -602,7 +668,7 @@ diff --git a/src/bridge.js b/src/bridge.js
    }
  
    // 二代拍一拍事件写入最近/未读消息流，让 AI 能看到“谁拍了拍谁/拍了拍我”。
-@@ -10458,7 +10777,7 @@
+@@ -10458,7 +10787,7 @@ async function main() {
      st.wakeConfig.wakeCount = (st.wakeConfig.wakeCount || 0) + 1;
      st.lastWakeReason = reason;
      saveSocialV2State();
@@ -611,7 +677,7 @@ diff --git a/src/bridge.js b/src/bridge.js
      log(`[reserved2] 唤醒 ${key}（${reason}）`);
      const rollbackWakeTime = () => {
        const idx = st.wakeTimes.lastIndexOf(wakeTime);
-@@ -10466,9 +10785,13 @@
+@@ -10466,9 +10795,13 @@ async function main() {
        saveSocialV2State();
      };
      try {
@@ -628,7 +694,7 @@ diff --git a/src/bridge.js b/src/bridge.js
        const restoreFiniteSleep = () => {
          if (hadFiniteSleep) {
            st.wakeConfig.sleepUntil = prevSleepUntil;
-@@ -10486,7 +10809,7 @@
+@@ -10486,7 +10819,7 @@ async function main() {
        } else if (result && result.queued === true) {
          // 入队而非真正在途：保留 pendingWakeKeys，等 DSH 恢复后真正投递的 turn/end 再触发收尾保护；
          // 不能在这里删除，否则补投的唤醒回合会丢失“未设置唤醒配置”的安全兜底。
@@ -637,7 +703,7 @@ diff --git a/src/bridge.js b/src/bridge.js
        }
      } catch (error) {
        pendingWakeKeys.delete(key);
-@@ -10532,6 +10855,7 @@
+@@ -10532,6 +10865,7 @@ async function main() {
    /** 会话此刻算忙的具体原因（只用于日志，避免排查时只能反复重启加猜）。 */
    function busyReasonV2(key, st) {
      if (st?.pendingWakeTimer) return 'pendingWakeTimer';
@@ -645,7 +711,7 @@ diff --git a/src/bridge.js b/src/bridge.js
      if (pendingWakeKeys.has(key)) return 'pendingWakeKey';
      const q = promptQueues.get(key);
      if (q?.running) return 'promptRunning';
-@@ -10546,6 +10870,7 @@
+@@ -10546,6 +10880,7 @@ async function main() {
  
    function isConversationBusyV2(key, st) {
      if (st && st.pendingWakeTimer) return true;
@@ -653,7 +719,7 @@ diff --git a/src/bridge.js b/src/bridge.js
      if (pendingWakeKeys.has(key)) return true;
      const q = promptQueues.get(key);
      if (q && (q.running || q.queue.length > 0)) return true;
-@@ -10763,6 +11088,7 @@
+@@ -10763,6 +11098,7 @@ async function main() {
    }
  
    function clearSocialV2Timers(key) {
@@ -661,7 +727,7 @@ diff --git a/src/bridge.js b/src/bridge.js
      const st = socialV2.conversations.get(key);
      if (!st) return;
      if (st.pendingWakeTimer) {
-@@ -10790,6 +11116,7 @@
+@@ -10790,6 +11126,7 @@ async function main() {
    }
  
    function clearAllSocialV2Timers() {
@@ -669,7 +735,7 @@ diff --git a/src/bridge.js b/src/bridge.js
      for (const key of socialV2.conversations.keys()) clearSocialV2Timers(key);
      pendingWakeKeys.clear();
      wakeConfigUpdatedKeys.clear();
-@@ -10855,6 +11182,9 @@
+@@ -10855,6 +11192,9 @@ async function main() {
      if (!plainContent && !quoteTargetIsSelf) return;
      const isOwner = String(event.user_id) === String(cfg.ownerQQ ?? '');
      const roleState = readRoleState();
@@ -679,7 +745,7 @@ diff --git a/src/bridge.js b/src/bridge.js
  
      // 若该会话有挂起的提问/审批，先当作回答处理（用当前消息自己的文字，不含引用原文）。
      // 审批只有管理员消息会被消费；群友消息不能因为“审批挂起”而被吞掉，应继续走正常处理。
-@@ -10873,17 +11203,22 @@
+@@ -10873,17 +11213,22 @@ async function main() {
  
      // 控制类话语：仅管理员（ownerQQ）可下达；群友触发直接拦截
      if (!isOwner && /进入角色扮演|退出角色扮演|切换角色|设置角色|改角色|换角色|关闭角色扮演|开启角色扮演/.test(plainContent)) {
@@ -704,7 +770,7 @@ diff --git a/src/bridge.js b/src/bridge.js
          const old = state.sessions[key];
          if (old) {
            sessionEpoch++;
-@@ -10932,42 +11267,47 @@
+@@ -10932,50 +11277,55 @@ async function main() {
            try { await withTimeout(api.stopSessionWork(old), DSH_CONTROL_TIMEOUT_MS, 'stopSessionWork'); }
            catch (error) { log(`⚠️ 停止旧会话失败 ${key}：${error?.message ?? error}；请在 DSH 检查旧任务`); }
            try { await withTimeout(api.workspace.archiveSession({ sessionId: old }), DSH_CONTROL_TIMEOUT_MS, 'archiveSession'); } catch {}
@@ -751,15 +817,15 @@ diff --git a/src/bridge.js b/src/bridge.js
          return;
        }
        // 其余 / 开头内容照常发给 DSH（DSH 的斜杠命令原样执行，如 /model）
-+    }
-+
+     }
+ 
 +    if (isDotConversation(key) && currentMode !== 'reserved2') {
 +      log(`[dot] 会话 ${key} 等待 reserved2 模式，不转入 DSH`);
 +      return;
-     }
- 
++    }
++
      // 二代仿真模式（reserved2）：唤醒调度
-@@ -10975,7 +11315,7 @@
+     if (currentMode === 'reserved2') {
        const sender = kind === 'group' ? (event.sender?.card || event.sender?.nickname || String(event.user_id)) : '私聊';
        appendSocialV2Message(key, sender, textContent, plainContent, quoteTargetIsSelf, isOwner, event.message_id ?? event.msg_id ?? null, mediaList, event.user_id ?? null, extractForwardIds(event.message ?? []));
        // 二代同样收集群聊黑话学习素材（AI 自主提交之外，桥接仍自动提取高频陌生词）
@@ -768,8 +834,19 @@ diff --git a/src/bridge.js b/src/bridge.js
        if (socialV2.paused) {
          appendActivity(`${key} [reserved2] AI 已暂停，消息仅入库不唤醒：${textContent.slice(0, 80)}`);
          return;
-@@ -12033,6 +12373,15 @@
+@@ -11339,6 +11689,7 @@ async function main() {
+   }
+ 
+   async function pumpMux() {
++    if (dotOnly) return;
+     // 事件流重连退避：DSH 侧流被立刻关闭时（例如版本不兼容，见 issue #34），
+     // 固定 3 秒重连会以每分钟 20 行的速度刷屏，真正有用的错误反而被淹没。
+     let retryMs = 3000;
+@@ -12031,8 +12382,18 @@ async function main() {
+     syncStickerLibrary(true).catch((error) => log('启动预热表情库失败:', error?.message ?? error));
+   }
    startDshWatch();
++  if (dotOnly) log('Dot 为唯一 AI 后端：已停用 DSH 客户端、探活、设置同步、事件流和独立黑话学习任务。');
    startSnowlumaWatch();
    startConsoleServer();
 +  dot.start();

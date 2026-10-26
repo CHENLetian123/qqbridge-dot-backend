@@ -44,6 +44,27 @@ const finish = (bridge, run, throughSeq, outcome) => dot(bridge, `/runs/${run.ru
   runToken: run.runToken, throughSeq, outcome
 });
 
+test('纯 Dot：全部白名单走 Dot，启动和收发不创建或调用 DSH 客户端', {timeout:20000}, async t=>{
+  const settings=config();settings.dot.only=true;settings.dot.conversations=['group:1001'];
+  const bridge=await startBridge(t,{config:settings,dshOnline:false,seedState:{'mode.json':{mode:'chat'}}});
+  const statusResponse=await bridge.console('/api/status');assert.equal(statusResponse.status,200);const status=statusResponse.body;
+  assert.equal(status.backend,'dot');assert.equal(status.mode,'reserved2');assert.equal(status.dshReady,false);
+  assert.deepEqual(status.dotConversations,['group:1001','group:1002']);
+  await bridge.injectGroup(1001,'pure-dot-first');await bridge.injectGroup(1002,'pure-dot-second');
+  for(const key of ['group:1001','group:1002']){
+    const turn=await claim(bridge,await nextWake(bridge,key),'only-'+key);
+    const page=await read(bridge,turn.run);assert.equal(page.messages.length,1);
+    const result=success(await dot(bridge,`/runs/${turn.run.runId}/send`,{runToken:turn.run.runToken,sendId:'reply-'+key,text:'Dot-only reply'}));
+    assert.equal(result.send.status,'confirmed');success(await finish(bridge,turn.run,page.readThroughSeq,'replied'));
+  }
+  const invalidMode=await bridge.console('/api/mode',{method:'POST',body:{mode:'chat'}});
+  assert.equal(invalidMode.status,409);
+  success(await bridge.console('/api/mode',{method:'POST',body:{mode:'reserved2'}}));
+  await new Promise(r=>setTimeout(r,5200));
+  assert.deepEqual(bridge.dshCalls,[],'Pure Dot must never instantiate, probe or call DSH.');
+  assert.equal(bridge.sends.length,2);
+});
+
 test('真实桥接：DSH 离线时 Dot 合并唤醒、发送、保留新消息、沉默收尾；另一群仍走 DSH', { timeout: 30_000 }, async t => {
   const bridge = await startBridge(t, { config: config() });
   success(await dot(bridge, '/health'));

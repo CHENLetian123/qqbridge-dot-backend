@@ -56,12 +56,14 @@ async function tree(root) {
 test('check 不写目标；apply 可重复识别 already-applied，config/state 保持不变', async t => {
   const { options } = await fixture(t);
   await chmod(join(options.sourceDir, 'src/bridge.js'), 0o770);
+  // Windows only exposes the writable/read-only subset of POSIX mode bits.
+  const originalMode = (await lstat(join(options.sourceDir, 'src/bridge.js'))).mode & 0o777;
   const originalTree = await tree(options.sourceDir);
   assert.equal((await applyQqbridgePatch({ ...options, check: true })).status, 'check-passed');
   assert.deepEqual(await tree(options.sourceDir), originalTree);
   assert.equal((await applyQqbridgePatch(options)).status, 'applied');
   assert.equal(await readFile(join(options.sourceDir, 'src/bridge.js'), 'utf8'), after);
-  assert.equal((await lstat(join(options.sourceDir, 'src/bridge.js'))).mode & 0o777, 0o770);
+  assert.equal((await lstat(join(options.sourceDir, 'src/bridge.js'))).mode & 0o777, originalMode);
   const installed = await tree(options.sourceDir);
   assert.equal(installed['config.json'], originalTree['config.json']);
   assert.deepEqual(installed.data, originalTree.data);
@@ -136,9 +138,13 @@ test('发布第二个 overlay 出错，已改 bridge 和已创建 overlay 都回
 
 test('目标 symlink 不能让安装写出源码树，遗留安装锁不会被本次调用删除', async t => {
   const { options, root } = await fixture(t);
-  const outside = join(root, 'outside.mjs');
+  const outsideDir = join(root, 'outside');
+  await mkdir(outsideDir);
+  const outside = join(outsideDir, 'outside.mjs');
   await writeFile(outside, 'outside must stay unchanged\n');
-  await symlink(outside, join(options.sourceDir, 'src/adapter.mjs'));
+  // A junction exercises the same linked-target rejection on Windows without
+  // requiring a privileged file-symlink operation or changing OS settings.
+  await symlink(process.platform === 'win32' ? outsideDir : outside, join(options.sourceDir, 'src/adapter.mjs'), process.platform === 'win32' ? 'junction' : 'file');
   await assert.rejects(applyQqbridgePatch(options), expectedCode('UNSAFE_PATH'));
   assert.equal(await readFile(outside, 'utf8'), 'outside must stay unchanged\n');
   await rm(join(options.sourceDir, 'src/adapter.mjs'));

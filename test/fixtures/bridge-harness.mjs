@@ -5,11 +5,10 @@ import fs from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 export const FIXTURE_CONSOLE_TOKEN = 'fixture_console_token_for_tests_only';
 export const FIXTURE_DOT_TOKEN = 'fixture_dot_backend_token_for_tests_only';
-const loader = fileURLToPath(new URL('./qqbridge-loader.mjs', import.meta.url));
+const loader = new URL('./qqbridge-loader.mjs', import.meta.url).href;
 const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 
 export async function eventually(check, { timeoutMs = 8_000, message = 'Condition was not met.' } = {}) {

@@ -9,3 +9,11 @@ logs/
 coverage/
 upstream/
 .DS_Store
+/.tmp/
+/tools/tunnel-client/
+/trial-*.json
+/windows-compat.patch
+/launcher/windows/bin/
+/launcher/windows/obj/
+/launcher/windows/publish/
+**/manager-test-result.txt
