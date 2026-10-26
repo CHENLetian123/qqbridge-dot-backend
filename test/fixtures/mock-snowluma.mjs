@@ -1,5 +1,6 @@
 // Test boundary only. No QQ client or SnowLuma installation is accessed.
 import { EventEmitter } from 'node:events';
+import { PNG } from './image.mjs';
 
 const report = value => process.send?.({ fixtureEvent: 'sdk', ...value });
 let client;
@@ -39,6 +40,11 @@ export class SnowLumaWebSocketClient extends EventEmitter {
   async getLoginInfo() { return { user_id: 999_999, nickname: 'FixtureDot' }; }
   async getGroupMemberInfo(groupId, userId) { return { group_id: groupId, user_id: userId, nickname: `fixture-${userId}` }; }
   async getGroupMemberList() { return []; }
+  async getImage({ file }) {
+    report({ action: 'get_image', params: { file } });
+    if (file !== 'fixture-image.png') throw new Error('Image not found in fixture cache.');
+    return { base64: PNG };
+  }
   async sendGroupMessage(groupId, message) {
     const result = { message_id: ++nextMessageId };
     report({ action: 'send_group_msg', params: { group_id: groupId, message }, result });

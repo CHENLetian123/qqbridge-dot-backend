@@ -1,6 +1,6 @@
 {
   "name": "qqbridge-dot-backend",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "private": true,
   "description": "ChatGPT Dot MCP Events gateway and QQBridge backend adapter.",
   "type": "module",
@@ -18,8 +18,8 @@
     "patch:check": "node scripts/apply-qqbridge-patch.mjs --check",
     "patch:apply": "node scripts/apply-qqbridge-patch.mjs",
     "demo": "node examples/offline-demo.mjs",
-    "format": "prettier --write src/mcp/**/*.mjs scripts/*mcp.mjs scripts/mcp-stdio.mjs test/mcp-gateway.test.mjs test/integration/mcp.test.mjs compat/qqbridge/overlay/src/dot-only-policy.mjs",
-    "format:check": "prettier --check src/mcp/**/*.mjs scripts/*mcp.mjs scripts/mcp-stdio.mjs test/mcp-gateway.test.mjs test/integration/mcp.test.mjs compat/qqbridge/overlay/src/dot-only-policy.mjs"
+    "format": "prettier --write src/mcp/**/*.mjs scripts/*mcp.mjs scripts/mcp-stdio.mjs test/mcp-gateway.test.mjs test/integration/mcp.test.mjs compat/qqbridge/overlay/src/dot-only-policy.mjs compat/qqbridge/overlay/src/dot-media.mjs test/media.test.mjs test/fixtures/image.mjs",
+    "format:check": "prettier --check src/mcp/**/*.mjs scripts/*mcp.mjs scripts/mcp-stdio.mjs test/mcp-gateway.test.mjs test/integration/mcp.test.mjs compat/qqbridge/overlay/src/dot-only-policy.mjs compat/qqbridge/overlay/src/dot-media.mjs test/media.test.mjs test/fixtures/image.mjs"
   },
   "dependencies": {
     "standardwebhooks": "^1.1.1"

@@ -29,16 +29,17 @@
     "qqbridge_adapter": "component-tested",
     "remote_mcp": "http-and-stdio-tested",
     "mcp_events": "component-and-live-event-tested",
-    "live_qq_dot_verification": "private-automatic-round-trip-on-local-variant"
+    "live_qq_dot_verification": "private-automatic-round-trip-on-local-variant",
+    "images": "component-tested; real-Dot-vision-and-generated-file-handoff-pending"
   },
   "verification": {
     "unit_tests": {
-      "passed": 53,
+      "passed": 61,
       "failed": 0,
       "skipped": 0
     },
     "component_tests": {
-      "passed": 7,
+      "passed": 9,
       "failed": 0,
       "skipped": 0
     },
@@ -47,15 +48,19 @@
     "patched_files": [
       {
         "path": "src/bridge.js",
-        "blob_sha": "3fbf114e7af76f76a70559e3a90d91927ffff87c"
+        "blob_sha": "61aa8d139d73c15bfe9d05a4a1b802be21a4969a"
       },
       {
         "path": "src/dot-backend.mjs",
-        "blob_sha": "9581126855bf1f8a0799aebc66cfa382162824a6"
+        "blob_sha": "5c11ecce595ce62dde050024fba0c06e0120f868"
       },
       {
         "path": "src/dot-only-policy.mjs",
         "blob_sha": "45eb2636df0215b3eb90fa9fcee567c977299563"
+      },
+      {
+        "path": "src/dot-media.mjs",
+        "blob_sha": "6eea77090bb6085313f3d8264c8d50854990eb10"
       }
     ]
   },

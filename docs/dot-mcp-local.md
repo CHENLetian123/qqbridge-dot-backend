@@ -47,7 +47,7 @@ npm start
 npm run check:mcp
 ~~~
 
-检查应显示 localMcpReady=true、bridgeReady=true、六个工具和事件 qq.wake.available。Linux 可用自己的服务管理器启动；Windows 也可使用 [原生管理器](../launcher/windows/README.md)，在同一窗口管理进程和日志。
+检查应显示 localMcpReady=true、bridgeReady=true、九个工具和事件 qq.wake.available。Linux 可用自己的服务管理器启动；Windows 也可使用 [原生管理器](../launcher/windows/README.md)，在同一窗口管理进程和日志。
 
 本地 MCP 是带独立 Bearer 的回环端点，不直接暴露到公网。桥接令牌和 MCP 传输令牌用途不同，不复用控制台、DSH 或 QQ 会话凭据。
 
@@ -113,3 +113,5 @@ qq_get_status 提供以下诊断，不返回密钥、回调 URL 或群消息：
 网关使用加密 SQLite 持久化订阅、outbox、运行引用和发送预留。QQBridge 的运行账本仍为进程内状态；桥接重启后发现未收尾的可能发送，会锁定对应会话，防止盲目重复回复。
 
 不要删除数据库、伪造完成状态或换发送 ID 绕过。先核实 QQ 实际发送结果，再停止网关并做一致备份，由维护者按证据修复。此初版没有远程解除核实锁的工具，也没有多用户 OAuth 隔离。
+
+图片工具刷新、识图、转发与原生生成文件发送的步骤见 [图片接入指南](images.md)。

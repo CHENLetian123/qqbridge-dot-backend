@@ -1,17 +1,18 @@
 diff --git a/src/bridge.js b/src/bridge.js
-index 9340068..3fbf114 100644
+index 9340068..61aa8d1 100644
 --- a/src/bridge.js
 +++ b/src/bridge.js
-@@ -29,6 +29,8 @@ import { hardenDir, manualDirCommand } from './state-acl.mjs';
+@@ -29,6 +29,9 @@ import { hardenDir, manualDirCommand } from './state-acl.mjs';
  import { extractForwardIds, forwardIdFromData, sanitizeForwardId, formatForwardResponse } from './forward.js';
  import { resolvePriceTable } from './model-prices.js';
  import { createTokenLedger } from './token-ledger.js';
 +import { createDotBackend } from './dot-backend.mjs';
++import { decodeImage, MAX_IMAGE_BODY } from './dot-media.mjs';
 +import { applyDotOnlyPolicy, createDisabledDshClient } from './dot-only-policy.mjs';
  import {
    loadSlang,
    saveSlang,
-@@ -656,6 +658,8 @@ function loadConfig() {
+@@ -656,6 +659,8 @@ function loadConfig() {
    const file = readJsonSafe(p, null, true);
    if (!file || typeof file !== 'object' || Array.isArray(file)) throw new Error(`配置格式错误：${p}`);
    const cfg = {
@@ -20,7 +21,7 @@ index 9340068..3fbf114 100644
      dsh: {
        baseUrl: 'http://127.0.0.1:3080',
        provider: 'deepseek-official',
-@@ -983,7 +987,7 @@ function loadConfig() {
+@@ -983,7 +988,7 @@ function loadConfig() {
    // 离线铸造会话 Cookie（见 dsh-client 的 mintBrowserSessionCookie）。
    // authTokenExplicit 记录「token 是用户填的还是这里猜的」，客户端据此排优先级。
    cfg.dsh.authTokenExplicit = Boolean(cfg.dsh.authToken);
@@ -29,7 +30,7 @@ index 9340068..3fbf114 100644
  
    // 思考强度可能被手工改成非法值（config.json 是用户可编辑的）。DeepSeek 适配器对非法值
    // 会硬拒绝，若直接透传会让每个会话的 selectModel 每次都失败；这里统一规范化并告警。
-@@ -1384,6 +1388,20 @@ let stateDirHardened = null;
+@@ -1384,6 +1389,20 @@ let stateDirHardened = null;
  // ── 主流程 ──────────────────────────────────────────────────────────────────
  async function main() {
    const cfg = loadConfig();
@@ -50,7 +51,7 @@ index 9340068..3fbf114 100644
    fs.mkdirSync(STATE_DIR, { recursive: true });
    hardenStateDirAcl();
    acquireLock();
-@@ -2366,7 +2384,7 @@ async function main() {
+@@ -2366,7 +2385,7 @@ async function main() {
    }
  
    // DSH 侧
@@ -59,7 +60,7 @@ index 9340068..3fbf114 100644
      token: cfg.dsh.authToken,
      // true=用户在 config.json 里显式填的；false=从日志猜的。猜来的不优先于离线铸造。
      tokenExplicit: cfg.dsh.authTokenExplicit === true,
-@@ -2422,7 +2440,9 @@ async function main() {
+@@ -2422,7 +2441,9 @@ async function main() {
    const reverse = new Map(); // sessionId -> conv key
    for (const [key, sessionId] of Object.entries(state.sessions)) reverse.set(sessionId, key);
    // 新版 DSH 事件流需要显式 follow；启动时为已持久化的 QQ 会话补上。
@@ -70,7 +71,7 @@ index 9340068..3fbf114 100644
    const sessionPromises = new Map(); // key -> create promise（防并发重复创建）
    const promptQueues = new Map(); // key -> { queue: [], running: false }：每个 QQ 会话串行投递 DSH prompt，保证 turn 顺序
  
-@@ -2563,7 +2583,10 @@ async function main() {
+@@ -2563,7 +2584,10 @@ async function main() {
    let dshReady = false;
    let dshCheckStarted = false;
    let snowlumaWatchStarted = false; // SnowLuma 上游健康探测只启动一次（见 startSnowlumaWatch）
@@ -82,7 +83,7 @@ index 9340068..3fbf114 100644
    let lastMode = currentMode;
    // closed-agent 模式使用的 DSH agent preset：留空表示「用 DSH 自己声明的默认 preset」。
    // 旧版本这里硬编码 'router-standard'，但 DSH 0.1.5 已移除该 preset，硬编码会导致
-@@ -2716,10 +2739,12 @@ async function main() {
+@@ -2716,10 +2740,12 @@ async function main() {
    }
  
    function sessionPolicy(key) {
@@ -95,7 +96,7 @@ index 9340068..3fbf114 100644
      return isSessionAllowedInCurrentMode(key) && state.sessions[key] === sessionId
        && state.sessionPolicies[key] === sessionPolicy(key);
    }
-@@ -2749,6 +2774,7 @@ async function main() {
+@@ -2749,6 +2775,7 @@ async function main() {
     * 限流时间戳会一直留在内存里。所有撤销会话映射的路径都必须调用这里。
     */
    function forgetConversationCaches(key) {
@@ -103,7 +104,7 @@ index 9340068..3fbf114 100644
      lastSendFailed.delete(key);
      activeWaits.delete(key);
      queuedHintAt.delete(key);
-@@ -2803,6 +2829,12 @@ async function main() {
+@@ -2803,6 +2830,12 @@ async function main() {
    }
  
    function reconcileSessionPolicies() {
@@ -116,7 +117,7 @@ index 9340068..3fbf114 100644
      // DSH preset 清单未知时**绝不能**做退役判定。
      //
      // 为什么：`sessionPolicy()` 包含 `modePreset()` 的结果，而 `modePreset()` 依赖
-@@ -2830,6 +2862,7 @@ async function main() {
+@@ -2830,6 +2863,7 @@ async function main() {
        const entries = [...queued.entries()];
        queued.clear();
        for (const [key, items] of entries) {
@@ -124,7 +125,7 @@ index 9340068..3fbf114 100644
          let sent = 0;
          let failed = 0;
          for (let i = 0; i < items.length; i++) {
-@@ -2911,6 +2944,7 @@ async function main() {
+@@ -2911,6 +2945,7 @@ async function main() {
              setupSleepTimerV2(key);
              scheduleProactiveCheckV2(key);
            }
@@ -132,7 +133,7 @@ index 9340068..3fbf114 100644
            log('桥接模式已确定为 reserved2，恢复有限睡眠定时器');
          }
          try { await flushQueue(); } catch (error) { log('补投队列异常:', error?.message ?? error); }
-@@ -2931,6 +2965,7 @@ async function main() {
+@@ -2931,6 +2966,7 @@ async function main() {
              setupSleepTimerV2(key);
              scheduleProactiveCheckV2(key);
            }
@@ -140,7 +141,7 @@ index 9340068..3fbf114 100644
            log('桥接模式已进入二代仿真模式，重建有限睡眠定时器');
          }
          log(`桥接模式已切换为: ${currentMode}`);
-@@ -2942,6 +2977,7 @@ async function main() {
+@@ -2942,6 +2978,7 @@ async function main() {
      }
    };
    function startDshWatch() {
@@ -148,7 +149,18 @@ index 9340068..3fbf114 100644
      if (dshCheckStarted) return;
      dshCheckStarted = true;
      checkDsh();
-@@ -3259,6 +3295,12 @@ async function main() {
+@@ -3183,8 +3220,8 @@ async function main() {
+         res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...SECURITY_HEADERS });
+         res.end(JSON.stringify(obj, null, 2));
+       };
+-      const readBody = () => new Promise((resolve, reject) => {
+-        const MAX_BODY_BYTES = 1_000_000;
++      const readBody = (maxBytes = 1_000_000) => new Promise((resolve, reject) => {
++        const MAX_BODY_BYTES = maxBytes;
+         const chunks = [];
+         let total = 0;
+         let settled = false;
+@@ -3259,6 +3296,12 @@ async function main() {
          sendJson({ ok: false, error: `Host 头不被允许（${hostHeader || '缺失'}）：控制台只接受本机回环访问` }, 403);
          return;
        }
@@ -161,7 +173,7 @@ index 9340068..3fbf114 100644
        // 控制台鉴权：所有请求需带 x-console-token 或 ?token=
        // 定长比较：`!==` 会在第一个不同的字符处短路，理论上可被本机进程用响应时延逐字节试探。
        // 令牌是 192 bit 随机值且只监听回环，所以这是纵深防御而非在野漏洞。
-@@ -3279,6 +3321,23 @@ async function main() {
+@@ -3279,6 +3322,23 @@ async function main() {
          }
          return;
        }
@@ -185,7 +197,7 @@ index 9340068..3fbf114 100644
        // 智能体调用隔离（集中关卡）。
        //
        // 背景：控制台令牌是「管理端全权」，会话令牌是「只能动自己这个会话」。MCP 工具进程
-@@ -3428,6 +3487,7 @@ async function main() {
+@@ -3428,6 +3488,7 @@ async function main() {
                role: rs.role ?? null,
                roleMode: rs.mode ?? 'active',
                dshReady,
@@ -193,7 +205,7 @@ index 9340068..3fbf114 100644
                socialV2Paused: socialV2.paused,
              });
              return;
-@@ -3438,6 +3498,8 @@ async function main() {
+@@ -3438,6 +3499,8 @@ async function main() {
              role: rs.role ?? null,
              roleMode: rs.mode ?? 'active',
              dshReady,
@@ -202,7 +214,7 @@ index 9340068..3fbf114 100644
              ownerQQ: cfg.ownerQQ ?? null,
              allowGroups: cfg.allow?.groups ?? [],
              allowPrivate: cfg.allow?.private ?? [],
-@@ -3462,6 +3524,10 @@ async function main() {
+@@ -3462,6 +3525,10 @@ async function main() {
            const body = await readBody();
            // 规范名与历史名都接受，落盘的始终是内部拼写（见 MODE_INPUT_ALIASES）。
            const requestedMode = normalizeModeInput(body.mode);
@@ -213,7 +225,7 @@ index 9340068..3fbf114 100644
            if (!requestedMode) {
              sendJson({ ok: false, error: `mode 必须是 ${VALID_MODES.join(' / ')}（simulation 为 reserved2 的规范名）` }, 400);
              return;
-@@ -3482,7 +3548,7 @@ async function main() {
+@@ -3482,7 +3549,7 @@ async function main() {
            // 写穿的是**内部拼写**（`simulation` 会写成 `reserved2`）：DSH 里那份值会被 refreshMode
            // 读回来当 `currentMode` 用，存规范名会让下游那些 `=== 'reserved2'` 判断失效。
            let dshSynced = false;
@@ -222,7 +234,7 @@ index 9340068..3fbf114 100644
              // unwrap() 在 result.ok 为 false 时直接抛错，所以能执行到下一行即代表写穿已成功
              // （不要在这里再判断 updated?.ok —— 解包后的值恒为真，那样的分支是死代码）。
              unwrap(await api.settings.update({ ns: 'qq-mode', patch: { mode: requestedMode } }), 'settings.update');
-@@ -3509,6 +3575,7 @@ async function main() {
+@@ -3509,6 +3576,7 @@ async function main() {
                setupSleepTimerV2(key);
                scheduleProactiveCheckV2(key);
              }
@@ -230,7 +242,7 @@ index 9340068..3fbf114 100644
              log('控制台：模式进入二代仿真模式，重建有限睡眠定时器');
            }
            log(`控制台：模式已设置为 ${requestedMode}${next.closedAgentPreset ? `（closed-agent preset: ${next.closedAgentPreset}）` : ''}${dshSynced ? '' : ' [仅本地，DSH 未同步]'}`);
-@@ -4071,6 +4138,7 @@ async function main() {
+@@ -4071,6 +4139,7 @@ async function main() {
            cfg.deny = { private: deny.private, groups: deny.groups };
            cfg.ownerQQ = ownerQQ;
            reconcileSessionPolicies();
@@ -238,7 +250,7 @@ index 9340068..3fbf114 100644
            log(`控制台：白名单已更新（群: ${allow.groups.join(',') || '无'}，私聊: ${allow.private.join(',') || '无'}，管理员: ${ownerQQ ?? '未设置'}）`);
            sendJson({ ok: true, allow, deny, ownerQQ });
            return;
-@@ -4545,6 +4613,10 @@ async function main() {
+@@ -4545,6 +4614,10 @@ async function main() {
            file.socialV2 = merged;
            atomicWriteJson(configFile, file);
            cfg.socialV2 = { ...(cfg.socialV2 ?? {}), ...merged };
@@ -249,7 +261,7 @@ index 9340068..3fbf114 100644
            // 仅当“会影响默认唤醒配置”的字段变化时，才同步到仍使用默认配置的现有会话。
            // 避免只改发送/等待/工具开关时，意外重置正在等待的潜水/唤醒计划。
            const WAKE_DEFAULT_KEYS = [
-@@ -4557,6 +4629,9 @@ async function main() {
+@@ -4557,6 +4630,9 @@ async function main() {
            const wakeDefaultChanged = body.wake && typeof body.wake === 'object' &&
              WAKE_DEFAULT_KEYS.some((k) => Object.prototype.hasOwnProperty.call(body.wake, k));
            if (wakeDefaultChanged) refreshAllDefaultWakeConfigsV2();
@@ -259,7 +271,7 @@ index 9340068..3fbf114 100644
            log('控制台：二代仿真配置已更新');
            sendJson({ ok: true, config: cfg.socialV2 });
            return;
-@@ -4575,9 +4650,10 @@ async function main() {
+@@ -4575,9 +4651,10 @@ async function main() {
            } else {
              log('控制台：二代 AI 已恢复');
              for (const key of socialV2.conversations.keys()) {
@@ -273,10 +285,14 @@ index 9340068..3fbf114 100644
            }
            saveSocialV2State();
            sendJson({ ok: true, paused: socialV2.paused });
-@@ -5199,6 +5275,13 @@ async function main() {
+@@ -5197,9 +5274,22 @@ async function main() {
+           return;
+         }
          if (req.method === 'POST' && url.pathname === '/api/socialV2/send-message') {
-           const body = await readBody();
+-          const body = await readBody();
++          const body = await readBody(req.headers['x-dot-run-token'] ? MAX_IMAGE_BODY : 1_000_000);
            const key = String(body.key ?? '').trim();
+-          let rawMessages = body.messages;
 +          // Bind before quote lookup: a later run cannot authorize an old send.
 +          let dotRunGuard = null;
 +          if (isDotConversation(key)) {
@@ -284,19 +300,26 @@ index 9340068..3fbf114 100644
 +            assertDotConversationAllowed(key, 'send');
 +            dotRunGuard = dot.captureSendGuard(key, req.headers['x-dot-run-id'], req.headers['x-dot-run-token']);
 +          }
-           let rawMessages = body.messages;
++          let dotImage = null;
++          if (body.image != null) {
++            if (!dotRunGuard) { sendJson({ ok: false, error: 'Image sends require a valid Dot run.' }, 403); return; }
++            try { const decoded = decodeImage(body.image); dotImage = { mimeType: decoded.info.mimeType, data: decoded.buffer.toString('base64') }; }
++            catch { sendJson({ ok: false, error: 'Unsupported image format or size.' }, 422); return; }
++          }
++          let rawMessages = dotImage ? ['[image]'] : body.messages;
            if (typeof rawMessages === 'string') {
              const trimmed = rawMessages.trim();
-@@ -5314,7 +5397,7 @@ async function main() {
+             // 兼容模型把数组序列化成 JSON 字符串传入的情况，例如 "[...]"。
+@@ -5314,7 +5404,7 @@ async function main() {
              actualReplyToMessageId = resolved.messageId;
            }
            try {
 -            const sentMessages = await sendMessagesV2(key, messages, delays, actualReplyToMessageId, atUserId);
-+            const sentMessages = await sendMessagesV2(key, messages, delays, actualReplyToMessageId, atUserId, dotRunGuard);
++            const sentMessages = await sendMessagesV2(key, messages, delays, actualReplyToMessageId, atUserId, dotRunGuard, dotImage);
              recordSentMessagesV2(key, sentMessages);
              st.lastAiReplyAt = now;
              st.lastActionAt = now;
-@@ -5341,7 +5424,7 @@ async function main() {
+@@ -5341,7 +5431,7 @@ async function main() {
              }
              if (st.sendTimes.length > 500) st.sendTimes = st.sendTimes.slice(-500);
              saveSocialV2State();
@@ -305,7 +328,7 @@ index 9340068..3fbf114 100644
            }
            return;
          }
-@@ -7045,6 +7128,11 @@ async function main() {
+@@ -7045,6 +7135,11 @@ async function main() {
          if (req.method === 'POST' && url.pathname === '/api/session/reset') {
            const body = await readBody();
            const key = String(body.key ?? '');
@@ -317,7 +340,7 @@ index 9340068..3fbf114 100644
            if (!key || !state.sessions[key]) { sendJson({ ok: false, error: '会话不存在' }, 404); return; }
            sessionEpoch++;
            const oldSessionId = state.sessions[key];
-@@ -7100,6 +7188,8 @@ async function main() {
+@@ -7100,6 +7195,8 @@ async function main() {
          }
          if (req.method === 'POST' && url.pathname === '/api/workspace/reset') {
            sessionEpoch++;
@@ -326,13 +349,13 @@ index 9340068..3fbf114 100644
            let archivedCount = 0;
            let stoppedCount = 0;
            try {
-@@ -7184,6 +7274,29 @@ async function main() {
+@@ -7184,6 +7281,29 @@ async function main() {
          sendJson({ ok: false, error: error?.message ?? String(error) }, status);
        }
      });
 +    // Fixed internal operation only. Credentials remain in this closure and never
 +    // appear in Dot context or responses. The original route applies all QQ checks.
-+    invokeDotSend = async (key, { text, replyToMessageId, runId, runToken }) => {
++    invokeDotSend = async (key, { text, image, replyToMessageId, runId, runToken }) => {
 +      dot.assertRun(key, runId, runToken);
 +      const address = server.address();
 +      if (!address || typeof address === 'string') throw dotError('Dot 发送通道尚未就绪', 503);
@@ -346,7 +369,7 @@ index 9340068..3fbf114 100644
 +          'x-dot-run-id': String(runId),
 +          'x-dot-run-token': String(runToken)
 +        },
-+        body: JSON.stringify({ key, messages: [text], ...(replyToMessageId == null ? {} : { replyToMessageId }) }),
++        body: JSON.stringify({ key, messages: [text], ...(image ? { image } : {}), ...(replyToMessageId == null ? {} : { replyToMessageId }) }),
 +        signal: AbortSignal.timeout(60000)
 +      });
 +      const result = await response.json();
@@ -356,7 +379,7 @@ index 9340068..3fbf114 100644
      server.listen(port, '127.0.0.1', () => {
        log(`本地控制台已启动：http://127.0.0.1:${port}`);
      });
-@@ -7220,8 +7333,8 @@ async function main() {
+@@ -7220,8 +7340,8 @@ async function main() {
    // 更新 lastAiReplyAt / 活跃调度，实际群里什么都没收到，而且只有一行滚动日志能看出问题。
    const lastSendFailed = new Map(); // key -> true（下一次成功即清除）
  
@@ -367,18 +390,37 @@ index 9340068..3fbf114 100644
      const safeMsg = redactKnownTokensOnly(msg);
      const [kind, id] = key.split(':');
      const parts = splitForQQ(safeMsg);
-@@ -7990,8 +8103,8 @@ async function main() {
+@@ -7443,7 +7563,7 @@ async function main() {
+   }
+ 
+ 
+-  async function onebotSend(kind, id, message, replyToMessageId, atUserId = null) {
++  async function onebotSend(kind, id, message, replyToMessageId, atUserId = null, image = null) {
+     const segments = [];
+     if (replyToMessageId !== undefined && replyToMessageId !== null && String(replyToMessageId).trim() !== '') {
+       const rid = String(replyToMessageId).trim();
+@@ -7462,7 +7582,8 @@ async function main() {
+       log(`发送内容包含会话令牌，已阻止发送 (${kind}:${id})`);
+       throw new Error('发送内容包含会话令牌，已阻止发送');
+     }
+-    segments.push({ type: 'text', data: { text: escapeCqText(rawMessage) } });
++    if (image) segments.push({ type: 'image', data: { file: 'base64://' + image.data } });
++    else segments.push({ type: 'text', data: { text: escapeCqText(rawMessage) } });
+     const action = kind === 'private' ? 'send_private_msg' : 'send_group_msg';
+     const params = kind === 'private' ? { user_id: Number(id), message: segments } : { group_id: Number(id), message: segments };
+     const httpUrl = String(cfg.snowluma?.httpUrl || 'http://127.0.0.1:3000').replace(/\/+$/, '');
+@@ -7990,8 +8111,8 @@ async function main() {
      return delays;
    }
  
 -  function sendMessagesV2(key, messages, delays, replyToMessageId, atUserId = null) {
 -    const assertSendAllowed = captureSendGuard(key);
-+  function sendMessagesV2(key, messages, delays, replyToMessageId, atUserId = null, runGuard = null) {
++  function sendMessagesV2(key, messages, delays, replyToMessageId, atUserId = null, runGuard = null, image = null) {
 +    const assertSendAllowed = captureSendGuard(key, runGuard);
      const [kind, id] = key.split(':');
      const sent = [];
      const failed = [];
-@@ -7999,15 +8112,18 @@ async function main() {
+@@ -7999,15 +8120,18 @@ async function main() {
        const msg = messages[i];
        const useReply = i === 0 ? replyToMessageId : null;
        const useAt = i === 0 ? atUserId : null;
@@ -386,8 +428,9 @@ index 9340068..3fbf114 100644
        sendChain = sendChain
          .then(async () => {
            assertSendAllowed();
+-          await onebotSend(kind, id, msg, useReply, useAt);
 +          dispatched = true;
-           await onebotSend(kind, id, msg, useReply, useAt);
++          await onebotSend(kind, id, msg, useReply, useAt, image);
            sent.push(msg);
          })
          .catch((error) => {
@@ -398,7 +441,7 @@ index 9340068..3fbf114 100644
          });
        if (i < delays.length) {
          const d = delays[i];
-@@ -8016,8 +8132,9 @@ async function main() {
+@@ -8016,8 +8140,9 @@ async function main() {
      }
      return sendChain.then(() => {
        if (failed.length > 0) {
@@ -409,7 +452,7 @@ index 9340068..3fbf114 100644
          throw err;
        }
        return sent;
-@@ -8033,10 +8150,13 @@ async function main() {
+@@ -8033,10 +8158,13 @@ async function main() {
    }
  
    // 入队校验无法约束排队等待期间的权限变化，每条消息临近实际发送时再次校验。
@@ -424,7 +467,7 @@ index 9340068..3fbf114 100644
        if (!isSessionAllowedInCurrentMode(key) || policy !== sessionPolicy(key)
            || (sessionId && state.sessions[key] !== sessionId)) {
          throw new Error('发送已取消：会话、模式或白名单已变化');
-@@ -8101,6 +8221,7 @@ async function main() {
+@@ -8101,6 +8229,7 @@ async function main() {
    }
  
    async function ensureSession(key) {
@@ -432,7 +475,7 @@ index 9340068..3fbf114 100644
      const epoch = sessionEpoch;
      const policy = sessionPolicy(key);
      if (!isSessionAllowedInCurrentMode(key)) throw new Error(`当前模式不允许会话 ${key}`);
-@@ -8904,6 +9025,211 @@ async function main() {
+@@ -8904,6 +9033,222 @@ async function main() {
    // 操作者预写的会话初始提示词（与控制台入口同样在 main() 里；损坏时只读降级，不阻塞启动）。
    loadInitialPrompts();
  
@@ -448,7 +491,7 @@ index 9340068..3fbf114 100644
 +    if (currentMode !== 'reserved2') throw dotError('Dot 仅支持 reserved2 模式');
 +    if (cfg.socialV2?.enabled === false || socialV2.paused) throw dotError('二代 AI 已关闭或暂停');
 +    if (!isSessionAllowedInCurrentMode(key)) throw dotError('目标不在当前模式允许范围内');
-+    const tool = { context: 'getPrompt', read: 'getUnread', finish: 'markRead', ack: 'markRead', acknowledge: 'markRead', send: 'sendMessage' }[action];
++    const tool = { context: 'getPrompt', read: 'getUnread', image: 'getImages', finish: 'markRead', ack: 'markRead', acknowledge: 'markRead', send: 'sendMessage' }[action];
 +    if (tool && !v2ToolEnabled(tool)) throw dotError(`工具未启用：${tool}`);
 +    if (action === 'send' && shouldBlockSilentReply(key)) throw dotError('静默模式已开启，当前不允许发送');
 +  }
@@ -530,7 +573,7 @@ index 9340068..3fbf114 100644
 +          participation: formatParticipationV2(st),
 +          wakeConfig: JSON.parse(JSON.stringify(st.wakeConfig)),
 +          observation: inspectDotObservation(key),
-+          instructions: '先分页读取当前会话未读消息，再决定是否发一条纯文本。无需插话时可安静完成。finish 必须带已处理的连续 throughSeq；本地桥接负责后续观察。'
++          instructions: 'Read unread messages first. Images have indices; use qq_read_image with messageSeq to see them. Reply with text, forward an image, or generate a new image with your native image generation capability and send the actual file with qq_send_image. Never claim generation or delivery without a real file and a confirmed receipt. Finish with the continuous readThroughSeq and replied or silent.'
 +        };
 +      },
 +      readUnread(key, afterSeq = 0, limit = 30) {
@@ -548,9 +591,20 @@ index 9340068..3fbf114 100644
 +          text: String(message.plain ?? message.text ?? ''),
 +          ...(message.tail && message.tail !== message.plain ? { tail: message.tail } : {}),
 +          time: message.time,
++          images: (Array.isArray(message.media) ? message.media : []).filter(media => media?.kind === 'image').slice(0, 32).map((_, index) => ({ index })),
 +          quoteTargetIsSelf: message.quoteTargetIsSelf === true
 +        }));
 +        return { messages, ...dotReadState(key) };
++      },
++      async readImage(key, { messageSeq, imageIndex }) {
++        assertDotConversationAllowed(key, 'image');
++        const st = getSocialV2State(key);
++        const message = st.unread.find(item => item.seq === messageSeq);
++        const media = (Array.isArray(message?.media) ? message.media : []).filter(item => item?.kind === 'image')[imageIndex];
++        if (!media) throw dotError('No image at this index in the read message.', 404);
++        const image = await fetchOneBotImage(media);
++        if (!image?.buffer) throw dotError('QQ image unavailable. Ask the sender to send the original image again.', 422);
++        return { mimeType: image.mimeType || mimeFromBuffer(image.buffer), data: image.buffer.toString('base64') };
 +      },
 +      getReadState(key) {
 +        assertDotConversationAllowed(key, 'read');
@@ -644,7 +698,7 @@ index 9340068..3fbf114 100644
    function isSocialEnabled() {
      return currentMode === 'reserved' && cfg.social?.enabled !== false;
    }
-@@ -9109,6 +9435,7 @@ async function main() {
+@@ -9109,6 +9454,7 @@ async function main() {
  
    // 实际的 DSH prompt 投递（不再直接对外暴露，统一走 promptQueues 串行队列）。
    async function deliverPromptNow(key, promptText, opts = {}) {
@@ -652,7 +706,7 @@ index 9340068..3fbf114 100644
      if (!isSessionAllowedInCurrentMode(key)) throw new Error(`当前模式不允许会话 ${key}`);
      // Recheck queued wakes at dispatch time: no model call while paused/disabled
      // and no reserved2 prompt leaking into an ordinary chat after a mode switch.
-@@ -9195,6 +9522,7 @@ async function main() {
+@@ -9195,6 +9541,7 @@ async function main() {
    // 每个 QQ 会话串行投递 DSH prompt，保证 turn 完成顺序与提交顺序一致，
    // 从而让 [SILENT]、摘要静默、退场标记都能准确匹配到自己的 turn。
    function deliverPrompt(key, promptText, opts = {}) {
@@ -660,7 +714,7 @@ index 9340068..3fbf114 100644
      return new Promise((resolve, reject) => {
        let entry = promptQueues.get(key);
        if (!entry) {
-@@ -9865,6 +10193,7 @@ async function main() {
+@@ -9865,6 +10212,7 @@ async function main() {
        if (topicHit || participantHit) t.lastMentionAt = Date.now();
      }
      saveSocialV2State();
@@ -668,7 +722,7 @@ index 9340068..3fbf114 100644
    }
  
    // 二代拍一拍事件写入最近/未读消息流，让 AI 能看到“谁拍了拍谁/拍了拍我”。
-@@ -10458,7 +10787,7 @@ async function main() {
+@@ -10458,7 +10806,7 @@ async function main() {
      st.wakeConfig.wakeCount = (st.wakeConfig.wakeCount || 0) + 1;
      st.lastWakeReason = reason;
      saveSocialV2State();
@@ -677,7 +731,7 @@ index 9340068..3fbf114 100644
      log(`[reserved2] 唤醒 ${key}（${reason}）`);
      const rollbackWakeTime = () => {
        const idx = st.wakeTimes.lastIndexOf(wakeTime);
-@@ -10466,9 +10795,13 @@ async function main() {
+@@ -10466,9 +10814,13 @@ async function main() {
        saveSocialV2State();
      };
      try {
@@ -694,7 +748,7 @@ index 9340068..3fbf114 100644
        const restoreFiniteSleep = () => {
          if (hadFiniteSleep) {
            st.wakeConfig.sleepUntil = prevSleepUntil;
-@@ -10486,7 +10819,7 @@ async function main() {
+@@ -10486,7 +10838,7 @@ async function main() {
        } else if (result && result.queued === true) {
          // 入队而非真正在途：保留 pendingWakeKeys，等 DSH 恢复后真正投递的 turn/end 再触发收尾保护；
          // 不能在这里删除，否则补投的唤醒回合会丢失“未设置唤醒配置”的安全兜底。
@@ -703,7 +757,7 @@ index 9340068..3fbf114 100644
        }
      } catch (error) {
        pendingWakeKeys.delete(key);
-@@ -10532,6 +10865,7 @@ async function main() {
+@@ -10532,6 +10884,7 @@ async function main() {
    /** 会话此刻算忙的具体原因（只用于日志，避免排查时只能反复重启加猜）。 */
    function busyReasonV2(key, st) {
      if (st?.pendingWakeTimer) return 'pendingWakeTimer';
@@ -711,7 +765,7 @@ index 9340068..3fbf114 100644
      if (pendingWakeKeys.has(key)) return 'pendingWakeKey';
      const q = promptQueues.get(key);
      if (q?.running) return 'promptRunning';
-@@ -10546,6 +10880,7 @@ async function main() {
+@@ -10546,6 +10899,7 @@ async function main() {
  
    function isConversationBusyV2(key, st) {
      if (st && st.pendingWakeTimer) return true;
@@ -719,7 +773,7 @@ index 9340068..3fbf114 100644
      if (pendingWakeKeys.has(key)) return true;
      const q = promptQueues.get(key);
      if (q && (q.running || q.queue.length > 0)) return true;
-@@ -10763,6 +11098,7 @@ async function main() {
+@@ -10763,6 +11117,7 @@ async function main() {
    }
  
    function clearSocialV2Timers(key) {
@@ -727,7 +781,7 @@ index 9340068..3fbf114 100644
      const st = socialV2.conversations.get(key);
      if (!st) return;
      if (st.pendingWakeTimer) {
-@@ -10790,6 +11126,7 @@ async function main() {
+@@ -10790,6 +11145,7 @@ async function main() {
    }
  
    function clearAllSocialV2Timers() {
@@ -735,7 +789,7 @@ index 9340068..3fbf114 100644
      for (const key of socialV2.conversations.keys()) clearSocialV2Timers(key);
      pendingWakeKeys.clear();
      wakeConfigUpdatedKeys.clear();
-@@ -10855,6 +11192,9 @@ async function main() {
+@@ -10855,6 +11211,9 @@ async function main() {
      if (!plainContent && !quoteTargetIsSelf) return;
      const isOwner = String(event.user_id) === String(cfg.ownerQQ ?? '');
      const roleState = readRoleState();
@@ -745,7 +799,7 @@ index 9340068..3fbf114 100644
  
      // 若该会话有挂起的提问/审批，先当作回答处理（用当前消息自己的文字，不含引用原文）。
      // 审批只有管理员消息会被消费；群友消息不能因为“审批挂起”而被吞掉，应继续走正常处理。
-@@ -10873,17 +11213,22 @@ async function main() {
+@@ -10873,17 +11232,22 @@ async function main() {
  
      // 控制类话语：仅管理员（ownerQQ）可下达；群友触发直接拦截
      if (!isOwner && /进入角色扮演|退出角色扮演|切换角色|设置角色|改角色|换角色|关闭角色扮演|开启角色扮演/.test(plainContent)) {
@@ -770,7 +824,7 @@ index 9340068..3fbf114 100644
          const old = state.sessions[key];
          if (old) {
            sessionEpoch++;
-@@ -10932,50 +11277,55 @@ async function main() {
+@@ -10932,50 +11296,55 @@ async function main() {
            try { await withTimeout(api.stopSessionWork(old), DSH_CONTROL_TIMEOUT_MS, 'stopSessionWork'); }
            catch (error) { log(`⚠️ 停止旧会话失败 ${key}：${error?.message ?? error}；请在 DSH 检查旧任务`); }
            try { await withTimeout(api.workspace.archiveSession({ sessionId: old }), DSH_CONTROL_TIMEOUT_MS, 'archiveSession'); } catch {}
@@ -834,7 +888,7 @@ index 9340068..3fbf114 100644
        if (socialV2.paused) {
          appendActivity(`${key} [reserved2] AI 已暂停，消息仅入库不唤醒：${textContent.slice(0, 80)}`);
          return;
-@@ -11339,6 +11689,7 @@ async function main() {
+@@ -11339,6 +11708,7 @@ async function main() {
    }
  
    async function pumpMux() {
@@ -842,7 +896,7 @@ index 9340068..3fbf114 100644
      // 事件流重连退避：DSH 侧流被立刻关闭时（例如版本不兼容，见 issue #34），
      // 固定 3 秒重连会以每分钟 20 行的速度刷屏，真正有用的错误反而被淹没。
      let retryMs = 3000;
-@@ -12031,8 +12382,18 @@ async function main() {
+@@ -12031,8 +12401,18 @@ async function main() {
      syncStickerLibrary(true).catch((error) => log('启动预热表情库失败:', error?.message ?? error));
    }
    startDshWatch();

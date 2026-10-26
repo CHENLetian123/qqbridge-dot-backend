@@ -2,7 +2,7 @@
 
 路径前缀：`/api/dot/v1`。本接口运行在 QQBridge 原控制台的回环 HTTP 服务器上，供同机 MCP 网关调用。它不是 MCP 协议端点。
 
-每次请求均需 `Authorization: Bearer <Dot专用token>`。POST 使用 `Content-Type: application/json`，请求体上限 64 KiB。Host、远端地址及 Origin 必须符合回环访问约束；不接受跨站请求，不启用 CORS。Bearer 不授予控制台管理权限。
+每次请求均需 `Authorization: Bearer <Dot专用token>`。POST 使用 `Content-Type: application/json`，普通请求体上限 64 KiB；send 为图片 Base64 单独允许最多 5,608,792 字节。Host、远端地址及 Origin 必须符合回环访问约束；不接受跨站请求，不启用 CORS。Bearer 不授予控制台管理权限。
 
 ## 请求表
 
@@ -12,7 +12,8 @@
 | `GET /wakes` | 无 | 可领取的 `wakes`；不开始运行租约 |
 | `POST /runs/claim` | `wakeId`, `claimId` | `run`, `context`, `readThroughSeq`, 恢复回执；领取时开始租约 |
 | `POST /runs/{runId}/read` | `runToken`, `afterSeq`（默认 0）, `limit`（默认 30） | `messages`, `readThroughSeq`, `unreadCount` |
-| `POST /runs/{runId}/send` | `runToken`, `sendId`, `text`, 可选 `replyToMessageId` | `send` 回执与是否为重复请求 |
+| `POST /runs/{runId}/image` | `runToken`, `messageSeq`, `imageIndex`（默认 0） | 当前运行已展示消息的图片字节与格式、尺寸、哈希；图片获取后复核租约及权限 |
+| `POST /runs/{runId}/send` | `runToken`, `sendId`, `text` 或 `image: {mimeType, data}`，可选 `replyToMessageId` | `send` 回执与是否为重复请求 |
 | `POST /runs/{runId}/finish` | `runToken`, `throughSeq`, `outcome` | 完成回执与观察状态 |
 
 首版没有 heartbeat、任意群号转发、管理员工具或外部回调 URL 参数。默认运行租约为 120 秒，可在配置中设为 100–900000 毫秒；实际联调不宜照搬测试使用的极短租约。
@@ -40,13 +41,13 @@
 
 第一次从 `afterSeq: 0` 读取。随后把上一页 `readThroughSeq` 作为游标继续读取，`limit` 为 1–100。服务端不允许跳过尚未展示的消息。
 
-`seq` 是 QQBridge 会话内序号，`messageId` 是 QQ 消息标识。两者不能替换。正文使用上游缓冲保存的文本，可能包含上游既有截断；需要尾部时返回 `tail`。当前没有媒体内容读取接口。
+`seq` 是 QQBridge 会话内序号，`messageId` 是 QQ 消息标识。两者不能替换。正文使用上游缓冲保存的文本，可能包含上游既有截断；需要尾部时返回 `tail`。含图消息返回 images: [{index: 0}, ...]，不暴露 QQ CDN URL 或缓存文件路径。使用 seq（不是 messageId）调用 image 获取其中一张；本轮未读取的消息不可访问。
 
 读取只记“该运行看到了哪些消息”，不会确认已处理。`finish.throughSeq` 必须显式提供，且不能超过当前运行已展示的连续水位。思考期间后来进入队列的消息不会被旧水位清除。
 
 ## 发送与不确定回执
 
-`text` 是一条纯文本，具体长度仍受 QQBridge 发送配置限制。可选 `replyToMessageId` 为非零整数的字符串；服务端继续验证引用属于当前会话。
+`text` 是一条纯文本；与 `image` 二选一。`image.data` 为规范 Base64，由网关下载或桥接读取，不由模型手写。单张图片限制及 MCP 文件参数见 [图片指南](images.md)。文本具体长度仍受 QQBridge 发送配置限制。可选 `replyToMessageId` 为非零整数的字符串；服务端继续验证引用属于当前会话。
 
 `sendId` 在会话内标识一个逻辑发送。重试保留 ID 和相同正文、引用目标。相同 ID 配不同载荷返回冲突；同 ID 的并发请求也只派发一次。成功发言不会自动完成运行。
 

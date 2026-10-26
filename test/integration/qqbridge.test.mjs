@@ -291,3 +291,34 @@ test('真实控制台恢复：模式切回、暂停恢复及零未读观察均�
   assert.equal(bridge.sends.length, 0);
   assert.equal(bridge.dshCalls.filter(call => call.method === 'sessions.prompt').length, 0);
 });
+
+test('real bridge image bytes use the existing QQ send guard, quota, deduplication and finish path', { timeout: 20000 }, async t => {
+  const { pngImage, largePngImage, PNG } = await import('../fixtures/image.mjs');
+  const bridge = await startBridge(t, { config: config() });
+  await bridge.injectGroup(1001, '', { message: [{ type: 'image', data: { file: 'fixture-image.png', url: 'https://example.invalid/private-signature-never-expose' } }] });
+  const { run } = await claim(bridge, await nextWake(bridge), 'media-roundtrip');
+  const imagePath = `/runs/${run.runId}/image`;
+  const imageArgs = { runToken: run.runToken, messageSeq: 1, imageIndex: 0 };
+  assert.equal((await dot(bridge, imagePath, imageArgs)).status, 403, 'Unseen messages are inaccessible');
+  const page = await read(bridge, run);
+  assert.deepEqual(page.messages[0].images, [{ index: 0 }]);
+  assert.equal(JSON.stringify(page).includes('private-signature'), false);
+  const picture = success(await dot(bridge, imagePath, imageArgs));
+  assert.equal(picture.image.data, PNG);
+  assert.equal(picture.image.width, 1);
+  assert.equal((await dot(bridge, imagePath, { ...imageArgs, imageIndex: 1 })).status, 404);
+  const sendPath = `/runs/${run.runId}/send`;
+  const args = { runToken: run.runToken, sendId: 'large-file', image: largePngImage() };
+  const sent = success(await dot(bridge, sendPath, args));
+  assert.equal(sent.send.status, 'confirmed');
+  assert.ok(sent.send.image.bytes > 1000000);
+  assert.equal(JSON.stringify(sent).includes(args.image.data), false);
+  assert.equal(success(await dot(bridge, sendPath, args)).deduplicated, true);
+  assert.equal(bridge.sends.length, 1);
+  assert.equal(bridge.sends[0].params.message[0].type, 'image');
+  assert.equal(bridge.sends[0].params.message[0].data.file, 'base64://' + args.image.data);
+  refused(await dot(bridge, sendPath, { ...args, image: pngImage() }));
+  refused(await finish(bridge, run, page.readThroughSeq, 'silent'));
+  success(await finish(bridge, run, page.readThroughSeq, 'replied'));
+  assert.equal((await dot(bridge, imagePath, imageArgs)).status, 410);
+});

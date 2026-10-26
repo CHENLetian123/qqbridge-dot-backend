@@ -107,3 +107,102 @@ test(
     assert.equal(bridge.sends.length, 1, 'Silent finish does not emit a message');
   },
 );
+
+test(
+  'MCP private image roundtrip: received image content, forwarding and generated-file handoff share the reply lifecycle',
+  { timeout: 20000 },
+  async (t) => {
+    const { PNG, pngImage } = await import('../fixtures/image.mjs');
+    const bridge = await startBridge(t, {
+      config: {
+        allow: { groups: ['1001'], private: ['5005'] },
+        dot: {
+          enabled: true,
+          only: true,
+          conversations: ['group:1001', 'private:5005'],
+          tokenFile: 'state/dot-api-token',
+          leaseMs: 15000,
+        },
+      },
+    });
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-image-chain-'));
+    const store = new GatewayStore(path.join(dir, 'state.sqlite'));
+    let downloads = 0;
+    const { DotGateway } = await import('../../src/mcp/gateway.mjs');
+    const gateway = new DotGateway({
+      store,
+      conversations: ['group:1001', 'private:5005'],
+      client: new QQBridgeClient({ baseUrl: bridge.baseUrl, token: FIXTURE_DOT_TOKEN }),
+      imageDownload: async () => {
+        downloads++;
+        return pngImage();
+      },
+    });
+    t.after(async () => {
+      await gateway.stop();
+      store.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+    await bridge.injectGroup(1001, '', {
+      message_type: 'private',
+      user_id: 5005,
+      message: [{ type: 'image', data: { file: 'fixture-image.png' } }],
+    });
+    await bridge.injectGroup(1001, 'other conversation stays unread');
+    const wake = await eventually(async () =>
+      (await gateway.call('qq_list_wakes', {})).wakes.find((wake) => wake.key === 'private:5005'),
+    );
+    const claimed = await gateway.call('qq_claim_turn', {
+      wakeId: wake.wakeId,
+      claimId: 'private-images',
+    });
+    const runId = claimed.run.runId;
+    const page = await gateway.call('qq_read_messages', { runId });
+    assert.equal(page.messages.length, 1);
+    const picture = await gateway.rpc('tools/call', {
+      name: 'qq_read_image',
+      arguments: { runId, messageSeq: page.messages[0].seq },
+    });
+    assert.equal(picture.content[1].type, 'image');
+    assert.equal(picture.content[1].data, PNG);
+    assert.equal(picture.structuredContent.image.data, undefined);
+    const forward = { runId, sendId: 'forward-received', messageSeq: page.messages[0].seq };
+    assert.equal((await gateway.call('qq_forward_image', forward)).send.status, 'confirmed');
+    await gateway.call('qq_forward_image', forward);
+    const generated = {
+      runId,
+      sendId: 'generated-image-file',
+      file: {
+        file_id: 'file-synthetic-generated',
+        download_url: 'https://files.example/generated.png?signature=do-not-save',
+        mime_type: 'image/png',
+        file_name: 'generated.png',
+      },
+    };
+    assert.equal((await gateway.call('qq_send_image', generated)).send.status, 'confirmed');
+    await gateway.call('qq_send_image', generated);
+    assert.equal(downloads, 1);
+    assert.equal(bridge.sends.length, 2);
+    for (const send of bridge.sends) {
+      assert.equal(send.action, 'send_private_msg');
+      assert.equal(send.params.user_id, 5005);
+      assert.equal(send.params.message[0].type, 'image');
+      assert.equal(send.params.message[0].data.file, 'base64://' + PNG);
+    }
+    assert.equal(
+      (
+        await gateway.call('qq_finish_turn', {
+          runId,
+          throughSeq: page.readThroughSeq,
+          outcome: 'replied',
+        })
+      ).completion.status,
+      'finished',
+    );
+    assert.equal(
+      (await gateway.call('qq_list_wakes', {})).wakes.some((wake) => wake.key === 'group:1001'),
+      true,
+    );
+    assert.deepEqual(bridge.dshCalls, []);
+  },
+);

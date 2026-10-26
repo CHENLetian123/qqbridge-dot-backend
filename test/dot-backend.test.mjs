@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDotBackend, DotError } from '../compat/qqbridge/overlay/src/dot-backend.mjs';
+import { pngImage } from './fixtures/image.mjs';
 
 const key = 'group:10001';
 const token = 'test-only-token-with-at-least-32-characters';
 const throws = (fn, code) => assert.throws(fn, error => error.code === code);
 
-function fixture({ sendText, leaseMs = 1000 } = {}) {
+function fixture({ sendText, readImage, leaseMs = 1000 } = {}) {
   let now = 1000;
   let paused = false;
   let observationBlocked = true;
@@ -24,6 +25,7 @@ function fixture({ sendText, leaseMs = 1000 } = {}) {
     readUnread: (_, after, limit) => ({ ...state(), messages: messages.filter(m => m.seq > after).slice(0, limit) }),
     acknowledgeThrough: (_, through) => { ack = Math.max(ack, through); messages = messages.filter(m => m.seq > through); },
     sendText: sendText ?? (async () => { sent += 1; return { sent: 1 }; }),
+    readImage: readImage ?? (async () => pngImage()),
     inspectObservation: () => ({ blocked: observationBlocked, remainingMs: 100 }),
     restoreWakeTimers: () => { restored += 1; },
     replayPendingWakes: (k, reason) => requests.push(['replay', k, reason]),
@@ -233,4 +235,45 @@ test('resuming a mode/pause interruption restores observation even after all unr
   assert.ok(f.requests.some(item => item[0] === 'wake' && item[2] === 'bootstrap'));
   f.backend.enqueueWake(key, 'bootstrap');
   assert.equal(f.backend.resume(key), false);
+});
+
+test('image access requires a read message in the same live run and rechecks expiry after fetching', async () => {
+  let release;
+  const f = fixture({ readImage: () => new Promise(resolve => { release = resolve; }) });
+  f.append('image'); const { run } = f.claim();
+  const args = { runToken: run.runToken, messageSeq: 1 };
+  await assert.rejects(f.backend.image(run.runId, args), error => error.code === 'IMAGE_NOT_READ');
+  f.backend.read(run.runId, { runToken: run.runToken });
+  await assert.rejects(f.backend.image(run.runId, { ...args, messageSeq: 2 }), error => error.code === 'IMAGE_NOT_READ');
+  await assert.rejects(f.backend.image(run.runId, { ...args, imageIndex: 32 }), error => error.code === 'INVALID_IMAGE_INDEX');
+  const pending = f.backend.image(run.runId, args);
+  f.advance(1001); release(pngImage());
+  await assert.rejects(pending, error => error.code === 'STALE_RUN');
+});
+
+test('image sends share text idempotency and finish accounting without keeping Base64 in receipts', async () => {
+  const requests = [];
+  const f = fixture({ sendText: async (_, body) => { requests.push(body); return { sent: 1 }; } });
+  f.append('image'); const { run } = f.claim();
+  f.backend.read(run.runId, { runToken: run.runToken });
+  const args = { runToken: run.runToken, sendId: 'image-1', image: pngImage() };
+  const sent = await f.backend.send(run.runId, args);
+  assert.equal(sent.send.status, 'confirmed');
+  assert.equal(sent.send.image.mimeType, 'image/png');
+  assert.equal(JSON.stringify(sent).includes(pngImage().data), false);
+  assert.equal((await f.backend.send(run.runId, args)).deduplicated, true);
+  assert.equal(requests.length, 1);
+  await assert.rejects(f.backend.send(run.runId, { runToken: run.runToken, sendId: 'image-1', text: 'different' }), error => error.code === 'SEND_ID_CONFLICT');
+  throws(() => f.backend.finish(run.runId, { runToken: run.runToken, throughSeq: 1, outcome: 'silent' }), 'SILENT_SEND_CONFLICT');
+  assert.equal(f.backend.finish(run.runId, { runToken: run.runToken, throughSeq: 1, outcome: 'replied' }).completion.status, 'finished');
+});
+
+test('lost image receipts fence new image or text sends and prevent finishing', async () => {
+  const f = fixture({ sendText: async () => { throw new Error('lost receipt'); } });
+  f.append('image'); const { run } = f.claim();
+  f.backend.read(run.runId, { runToken: run.runToken });
+  const args = { runToken: run.runToken, sendId: 'unknown-image', image: pngImage() };
+  assert.equal((await f.backend.send(run.runId, args)).send.status, 'unknown');
+  await assert.rejects(f.backend.send(run.runId, { ...args, sendId: 'other-image' }), error => error.code === 'SEND_RECONCILIATION_REQUIRED');
+  throws(() => f.backend.finish(run.runId, { runToken: run.runToken, throughSeq: 1, outcome: 'replied' }), 'UNRESOLVED_SEND');
 });

@@ -36,14 +36,14 @@ export class QQBridgeClient {
     this.#fetch = fetchImpl;
   }
 
-  async #request(path, body) {
+  async #request(path, body, timeoutMs = this.#timeoutMs) {
     let response;
     try {
       response = await this.#fetch(`${this.#origin}/api/dot/v1${path}`, {
         method: body === undefined ? 'GET' : 'POST',
         headers: { authorization: `Bearer ${this.#token}`, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: AbortSignal.timeout(this.#timeoutMs), redirect: 'error'
+        signal: AbortSignal.timeout(timeoutMs), redirect: 'error'
       });
     } catch {
       throw new QQBridgeClientError('TRANSPORT_UNKNOWN', 'The bridge response was not received; a write may already have happened. Do not invent a new idempotency ID.');
@@ -59,19 +59,20 @@ export class QQBridgeClient {
     return result;
   }
 
-  #runRequest(operation, run, body) {
+  #runRequest(operation, run, body, timeoutMs = this.#timeoutMs) {
     if (!run || typeof run.runId !== 'string' || !/^[a-f0-9-]+$/.test(run.runId) || typeof run.runToken !== 'string') {
       throw new QQBridgeClientError('INVALID_RUN', 'Use the run identity returned by claim().');
     }
-    return this.#request(`/runs/${run.runId}/${operation}`, { ...body, runToken: run.runToken });
+    return this.#request(`/runs/${run.runId}/${operation}`, { ...body, runToken: run.runToken }, timeoutMs);
   }
 
   health() { return this.#request('/health'); }
   listWakes() { return this.#request('/wakes'); }
   claim({ wakeId, claimId }) { return this.#request('/runs/claim', { wakeId, claimId }); }
   read(run, { afterSeq = 0, limit = 30 } = {}) { return this.#runRequest('read', run, { afterSeq, limit }); }
-  send(run, { sendId, text, replyToMessageId } = {}) {
-    return this.#runRequest('send', run, { sendId, text, ...(replyToMessageId == null ? {} : { replyToMessageId }) });
+  image(run, { messageSeq, imageIndex = 0 } = {}) { return this.#runRequest('image', run, { messageSeq, imageIndex }, 30_000); }
+  send(run, { sendId, text, image, replyToMessageId } = {}) {
+    return this.#runRequest('send', run, { sendId, ...(image ? { image } : { text }), ...(replyToMessageId == null ? {} : { replyToMessageId }) }, image ? 45_000 : this.#timeoutMs);
   }
   finish(run, { throughSeq, outcome } = {}) { return this.#runRequest('finish', run, { throughSeq, outcome }); }
 }

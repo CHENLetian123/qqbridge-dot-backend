@@ -2,7 +2,7 @@
 
 让你在 **ChatGPT 中的真实 Dot** 通过 SnowLuma + QQBridge 接收 QQ 消息，并使用 MCP 工具回复。
 
-已验证真实事件唤醒，以及私聊的自动领取、读取、发送和收尾。支持纯 Dot 后端：全部显式白名单会话由 Dot 接管，不需要运行 DSH；也保留按会话混合后端的兼容方式。目前 Dot 工具支持纯文本消息。
+已验证真实事件唤醒，以及私聊的自动领取、读取、发送和收尾。支持纯 Dot 后端：全部显式白名单会话由 Dot 接管，不需要运行 DSH；也保留按会话混合后端的兼容方式。0.4.0 新增按消息读取图片、原图转发和发送 ChatGPT 图片文件；Dot 生成的新图片也通过文件发送入口传回 QQ。图片的真实账号识图与生成回传需按下方指南另行验收。
 
 ## 先理解这条链路
 
@@ -165,7 +165,7 @@ qqbridge-dot-backend/tools/tunnel-client/bin/tunnel-client.exe
 1. 点击“添加 → 添加自定义 MCP 服务器”。
 2. 名称填 QQBridge Dot，连接选择“隧道 / Tunnel”，填写同一个 tunnel_id。
 3. 当前私有 stdio 接入没有 OAuth 服务，身份验证选择“无 / No authentication”。本地 Bearer 已由 stdio 适配器从本机文件读取。
-4. 创建插件，确认能发现六个工具和事件 qq.wake.available。
+4. 创建插件，确认能发现九个工具和事件 qq.wake.available。
 5. 在 ChatGPT 调用 qq_get_status，确认 bridgeReachable=true，且会话列表包含自己的私聊。
 
 平台和工作区权限仍然适用。插件显示“已连接”后，继续执行下一步；此时 subscriptions 仍可能为 0。
@@ -200,6 +200,18 @@ qqbridge-dot-backend/tools/tunnel-client/bin/tunnel-client.exe
 
 只在 Dot 对话里手动要求“处理待领取唤醒”后收到回复，可以验证工具链路；还需要发一条新 QQ 消息，确认事件订阅能自动唤醒 Dot。webhook 2xx 或 subscribed=true 也不能单独证明整轮完成。
 
+## 图片输入、输出与生成图片
+
+升级到 0.4.0 后，在当前回合收尾时重启 QQ Bridge 与 Dot MCP，然后到 ChatGPT 插件的“管理” → “管理应用” → “刷新工具”。原有事件订阅继续使用，不要重复创建任务。
+
+让 Dot 重新列出工具，确认多出 qq_read_image、qq_forward_image、qq_send_image。随后给 Dot 这段补充指令：
+
+> 对已经授权的 QQ 会话，读取消息后检查 images；用 messageSeq 和 imageIndex 调用 qq_read_image 看图，再回答。需要原图回传时调用 qq_forward_image。用户要求画图时，先使用你自己的图片生成能力，获得实际图片文件，再通过 qq_send_image 的原生 file 参数发送；不要手写 Base64、下载地址或本机路径。确认 send.status=confirmed 后，用实际 readThroughSeq 正常收尾。若图片生成或文件传递不可用，请如实说明，不能把文字描述当成已发图片。
+
+在 QQ 私聊分别测试：发一张图并询问内容、要求把该图发回来、要求新画一张图并发回来。三项测试均要核对自动唤醒、图片工具调用、QQ 图片实际到达与 finished；工具列表出现不代表真实识图和生成已经验证。
+
+支持 PNG、JPEG、GIF、WebP，单张最多 4 MiB、20 百万像素，单边最多 8192。图片链接不直接交给 QQ 下载；文件由本地网关安全下载并验证后发送。生成使用 Dot 本身的能力，本后端不另行调用图片生成 API 或使用隧道密钥计费生图。完整流程与限制见 [图片接入指南](docs/images.md)。
+
 ## 私聊跑通后，增加群聊或其他会话
 
 以增加 group:123456789 为例：
@@ -233,9 +245,9 @@ qqbridge-dot-backend/tools/tunnel-client/bin/tunnel-client.exe
 
 ## 工具、限制和开发验证
 
-六个工具为 qq_get_status、qq_list_wakes、qq_claim_turn、qq_read_messages、qq_send_message、qq_finish_turn。消息文本是待处理数据，不授予工具或跨会话权限。发送使用稳定 ID，读取和已读确认分开，静默也需要收尾。
+九个工具为 qq_get_status、qq_list_wakes、qq_claim_turn、qq_read_messages、qq_read_image、qq_send_message、qq_forward_image、qq_send_image、qq_finish_turn。消息文本是待处理数据，不授予工具或跨会话权限。发送使用稳定 ID，读取和已读确认分开，静默也需要收尾。
 
-当前 Dot 工具仅支持纯文本读取、回复和收尾，尚未迁移 DSH 模型配置、完整对话历史、独立研究、图片、语音和贴纸工具。网关使用加密 SQLite 保存订阅、outbox 和发送预留，但 QQBridge 的运行账本仍在进程内，未知发送需要核实。
+当前支持文本与图片收发，尚未迁移 DSH 模型配置、完整对话历史、独立研究、语音和独立贴纸库工具。网关使用加密 SQLite 保存订阅、outbox 和发送预留，但 QQBridge 的运行账本仍在进程内，未知发送需要核实。
 
 ~~~powershell
 npm run format:check

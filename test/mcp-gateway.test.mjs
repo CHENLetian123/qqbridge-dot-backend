@@ -13,6 +13,7 @@ import { Webhook } from 'standardwebhooks';
 import { GatewayStore } from '../src/mcp/store.mjs';
 import { DotGateway } from '../src/mcp/gateway.mjs';
 import { createMcpServer } from '../src/mcp/server.mjs';
+import { PNG, pngImage } from './fixtures/image.mjs';
 import {
   publicAddress,
   callbackUrl,
@@ -563,9 +564,26 @@ test('official MCP SDK client can initialize, discover and call tools on the HTT
       requestInit: { headers: { authorization: 'Bearer ' + transportToken } },
     }),
   );
-  assert.equal((await client.listTools()).tools.length, 6);
+  const discovered = (await client.listTools()).tools;
+  assert.equal(discovered.length, 9);
+  const imageTool = discovered.find((tool) => tool.name === 'qq_send_image');
+  assert.deepEqual(imageTool._meta['openai/fileParams'], ['file']);
+  assert.deepEqual(imageTool.inputSchema.properties.file.required, ['download_url', 'file_id']);
   const response = await client.callTool({ name: 'qq_get_status', arguments: {} });
   assert.equal(response.structuredContent.bridgeReachable, true);
+  await client.callTool({
+    name: 'qq_claim_turn',
+    arguments: { wakeId: 'wake-1', claimId: 'image-sdk' },
+  });
+  f.client.image = async () => ({ ok: true, messageSeq: 1, image: pngImage() });
+  const picture = await client.callTool({
+    name: 'qq_read_image',
+    arguments: { runId: f.run.runId, messageSeq: 1 },
+  });
+  assert.equal(picture.content[1].type, 'image');
+  assert.equal(picture.content[1].data, PNG);
+  assert.equal(picture.structuredContent.image.data, undefined);
+  assert.equal(picture.content[0].text.includes(PNG), false);
 });
 
 test('stdio tunnel adapter forwards JSON-RPC without exposing transport credentials', async (t) => {
@@ -621,4 +639,95 @@ test('stdio tunnel adapter forwards JSON-RPC without exposing transport credenti
   assert.equal(result.id, 17);
   assert.ok(result.result.capabilities.events);
   assert.equal(JSON.stringify(result).includes(transportToken), false);
+});
+
+test('native image file parameters download once, deduplicate by file ID and never persist signed URLs or bytes', async (t) => {
+  const f = fixture(t);
+  let downloads = 0;
+  f.gateway.imageDownload = async () => {
+    downloads++;
+    return pngImage();
+  };
+  await f.gateway.call('qq_claim_turn', { wakeId: 'wake-1', claimId: 'image-file' });
+  const args = {
+    runId: f.run.runId,
+    sendId: 'native-file',
+    file: {
+      file_id: 'file-fixture',
+      download_url: 'https://files.example/image?signature=private-test-marker',
+      mime_type: 'image/png',
+      file_name: 'output.png',
+    },
+  };
+  assert.equal((await f.gateway.call('qq_send_image', args)).send.status, 'confirmed');
+  assert.equal(
+    (
+      await f.gateway.call('qq_send_image', {
+        ...args,
+        file: { ...args.file, download_url: 'https://files.example/fresh-url' },
+      })
+    ).send.status,
+    'confirmed',
+  );
+  assert.equal(downloads, 1);
+  assert.equal(f.calls.filter((call) => call[0] === 'send').length, 1);
+  const records = JSON.stringify(f.gateway.store.list('send'));
+  assert.equal(records.includes('private-test-marker'), false);
+  assert.equal(records.includes(PNG), false);
+  await assert.rejects(
+    f.gateway.call('qq_send_message', {
+      runId: f.run.runId,
+      sendId: args.sendId,
+      text: 'conflict',
+    }),
+    /conflict/,
+  );
+  await assert.rejects(
+    f.gateway.call('qq_send_image', {
+      ...args,
+      sendId: 'invalid',
+      file: { file_id: 'file', download_url: 42 },
+    }),
+    (error) => error.code === -32602,
+  );
+});
+
+test('image preparation failure is a definite rejection with no QQ dispatch or uncertain-send fence', async (t) => {
+  const f = fixture(t);
+  f.gateway.imageDownload = async () => {
+    throw new Error('private URL must never escape');
+  };
+  await f.gateway.call('qq_claim_turn', { wakeId: 'wake-1', claimId: 'image-reject' });
+  const response = await f.gateway.rpc('tools/call', {
+    name: 'qq_send_image',
+    arguments: {
+      runId: f.run.runId,
+      sendId: 'bad-image',
+      file: { file_id: 'bad-file', download_url: 'https://127.0.0.1/private' },
+    },
+  });
+  assert.equal(response.structuredContent.send.status, 'rejected');
+  assert.equal(
+    f.calls.some((call) => call[0] === 'send'),
+    false,
+  );
+  assert.equal(JSON.stringify(response).includes('private URL'), false);
+  await f.gateway.call('qq_finish_turn', { runId: f.run.runId, throughSeq: 0, outcome: 'silent' });
+});
+
+test('forwarding a received image uses the same durable ledger as native generated files', async (t) => {
+  const f = fixture(t);
+  let reads = 0;
+  f.client.image = async (_run, args) => {
+    reads++;
+    assert.equal(args.messageSeq, 1);
+    return { image: pngImage() };
+  };
+  await f.gateway.call('qq_claim_turn', { wakeId: 'wake-1', claimId: 'image-forward' });
+  const args = { runId: f.run.runId, sendId: 'forward-one', messageSeq: 1 };
+  await f.gateway.call('qq_forward_image', args);
+  await f.gateway.call('qq_forward_image', args);
+  assert.equal(reads, 1);
+  assert.equal(f.calls.find((call) => call[0] === 'send')[1].image.data, PNG);
+  await assert.rejects(f.gateway.call('qq_forward_image', { ...args, messageSeq: 2 }), /conflict/);
 });

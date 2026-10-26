@@ -1,6 +1,7 @@
 // QQBridge Dot adapter, original code: Copyright (c) 2026 Slava Chan, MIT.
 // Experimental, process-local state. This is a loopback bridge API, not an MCP server.
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { decodeImage, MAX_IMAGE_BODY } from './dot-media.mjs';
 
 export class DotError extends Error {
   constructor(code, message, statusCode = 409) {
@@ -90,6 +91,7 @@ export class DotBackend {
 
   #publicSend(send) {
     return { sendId: send.sendId, status: send.status, text: send.text,
+      ...(send.imageInfo ? { image: clone(send.imageInfo) } : {}),
       ...(send.replyToMessageId ? { replyToMessageId: send.replyToMessageId } : {}),
       ...(send.receipt ? { receipt: clone(send.receipt) } : {}),
       ...(send.error ? { error: clone(send.error) } : {}) };
@@ -269,19 +271,39 @@ export class DotBackend {
     return { ok: true, messages: clone(result.messages), readThroughSeq: this.#visibleThrough(run), unreadCount: state.unreadSeqs.length };
   }
 
-  async send(runId, { runToken, sendId, text: rawText, replyToMessageId } = {}) {
+  async image(runId, { runToken, messageSeq, imageIndex = 0 } = {}) {
+    const run = this.#getRun(runId, runToken);
+    this.assertRun(run.key, runId, runToken);
+    this.#allowed(run.key, 'image');
+    if (!integer(messageSeq) || !run.seen.has(messageSeq)) fail('IMAGE_NOT_READ', 'Read the message in this run before accessing its image.', 403);
+    if (!integer(imageIndex) || imageIndex > 31) fail('INVALID_IMAGE_INDEX', 'Use an imageIndex from 0 to 31.', 400);
+    const image = await this.#hooks.readImage(run.key, { messageSeq, imageIndex });
+    this.assertRun(run.key, runId, runToken);
+    this.#allowed(run.key, 'image');
+    let decoded;
+    try { decoded = decodeImage(image); }
+    catch { fail('INVALID_IMAGE', 'The message image is unavailable or exceeds supported raster limits.', 422); }
+    return { ok: true, messageSeq, imageIndex, image: { ...decoded.info, data: decoded.buffer.toString('base64') } };
+  }
+
+  async send(runId, { runToken, sendId, text: rawText, image, replyToMessageId } = {}) {
     const run = this.#getRun(runId, runToken);
     const session = this.#session(run.key);
-    if (!text(sendId) || sendId.length > 128 || !text(rawText) || rawText.length > 4096) {
+    if (!text(sendId) || sendId.length > 128 || (image ? rawText != null : !text(rawText) || rawText.length > 4096)) {
       fail('INVALID_SEND', 'sendId and a bounded nonempty text are required.', 400);
     }
-    if (rawText.includes(this.#token) || [...this.#runs.values()].some(item => rawText.includes(item.runToken))) {
+    if (!image && (rawText.includes(this.#token) || [...this.#runs.values()].some(item => rawText.includes(item.runToken)))) {
       fail('CREDENTIAL_IN_MESSAGE', 'The message contains a bridge credential.', 403);
     }
     if (replyToMessageId != null && (typeof replyToMessageId !== 'string' || !/^-?[1-9]\d*$/.test(replyToMessageId))) {
       fail('INVALID_REPLY_ID', 'replyToMessageId must be a nonzero integer string.', 400);
     }
-    const body = { text: rawText.trim(), replyToMessageId: replyToMessageId ?? null };
+    let imageData, imageMetadata;
+    if (image) {
+      try { const decoded = decodeImage(image); imageData = { mimeType: decoded.info.mimeType, data: decoded.buffer.toString('base64') }; imageMetadata = decoded.info; }
+      catch { fail('INVALID_IMAGE', 'Only bounded PNG, JPEG, GIF and WebP image bytes are accepted.', 422); }
+    }
+    const body = { text: image ? '' : rawText.trim(), ...(imageMetadata ? { imageInfo: imageMetadata } : {}), replyToMessageId: replyToMessageId ?? null };
     const fingerprint = JSON.stringify(body);
     const existing = session.sends.get(sendId);
     if (existing) {
@@ -301,7 +323,7 @@ export class DotBackend {
     this.#sendCount += 1;
     send.promise = Promise.resolve().then(async () => {
       try {
-        const receipt = await this.#hooks.sendText(run.key, { ...body, runId, runToken, sendId });
+        const receipt = await this.#hooks.sendText(run.key, { ...body, ...(imageData ? { image: imageData } : {}), runId, runToken, sendId });
         if (receipt?.sent !== 1) throw new DotError('UNCONFIRMED_SEND', 'The bridge did not confirm one complete send.', 502);
         // A late network receipt is useful evidence, but it must not mutate a replacement run.
         send.status = 'confirmed';
@@ -446,12 +468,13 @@ export class DotBackend {
       if (!/^application\/json(?:\s*;|$)/i.test(String(req.headers['content-type'] || ''))) {
         fail('JSON_REQUIRED', 'Use Content-Type: application/json.', 415);
       }
-      if (Number(req.headers['content-length']) > 65_536) fail('BODY_TOO_LARGE', 'Request body exceeds 64 KiB.', 413);
-      const body = await readBody();
+      const maxBody = /\/runs\/[a-f0-9-]+\/send$/.test(url.pathname) ? MAX_IMAGE_BODY : 65_536;
+      if (Number(req.headers['content-length']) > maxBody) fail('BODY_TOO_LARGE', 'Request body exceeds the operation limit.', 413);
+      const body = await readBody(maxBody);
       if (!body || typeof body !== 'object' || Array.isArray(body)) fail('INVALID_BODY', 'A JSON object is required.', 400);
-      if (Buffer.byteLength(JSON.stringify(body)) > 65_536) fail('BODY_TOO_LARGE', 'Request body exceeds 64 KiB.', 413);
+      if (Buffer.byteLength(JSON.stringify(body)) > maxBody) fail('BODY_TOO_LARGE', 'Request body exceeds 64 KiB.', 413);
       if (url.pathname === `${prefix}/runs/claim`) { sendJson(this.claim(body)); return; }
-      const match = /^\/api\/dot\/v1\/runs\/([a-f0-9-]+)\/(read|send|finish)$/.exec(url.pathname);
+      const match = /^\/api\/dot\/v1\/runs\/([a-f0-9-]+)\/(read|image|send|finish)$/.exec(url.pathname);
       if (!match) fail('NOT_FOUND', 'Unknown Dot route.', 404);
       const [, runId, operation] = match;
       sendJson(await this[operation](runId, body));

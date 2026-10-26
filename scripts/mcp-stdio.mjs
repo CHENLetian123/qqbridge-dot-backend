@@ -21,7 +21,7 @@ input.on('line', async (line) => {
         headers: { authorization: 'Bearer ' + cfg.token, 'content-type': 'application/json' },
         body: line,
         redirect: 'error',
-        signal: AbortSignal.timeout(20_000),
+        signal: AbortSignal.timeout(60_000),
       });
       if (res.status === 202) return;
       if (!res.ok) throw new Error('Transport');
