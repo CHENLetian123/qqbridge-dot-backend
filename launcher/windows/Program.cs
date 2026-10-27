@@ -169,12 +169,17 @@ internal sealed class ManagerForm : Form
         tunnel = new("tunnel", "Dot Tunnel");
         tunnelRuntime = new(dotDirectory);
         services = dotOnly ? [snow, bridge, dot, tunnel] : [snow, dsh, bridge, dot, tunnel];
+        SuspendLayout();
+        // All sizes below are authored at 96 DPI; scale the complete control tree together.
+        AutoScaleDimensions = new SizeF(96, 96);
+        AutoScaleMode = AutoScaleMode.Dpi;
         Text = "GPTBot 管理器"; Size = new Size(1100, 920); MinimumSize = new Size(960, 800);
         StartPosition = FormStartPosition.CenterScreen; Font = new Font("Microsoft YaHei UI", 10);
         BackColor = Color.FromArgb(243, 246, 251);
         var layout = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(24), ColumnCount = 1, RowCount = 6 };
+        layout.ColumnStyles.Add(new(SizeType.Percent, 100));
         layout.RowStyles.Add(new(SizeType.Absolute, 63)); layout.RowStyles.Add(new(SizeType.Absolute, 48));
-        layout.RowStyles.Add(new(SizeType.Absolute, dotOnly ? 310 : 365)); layout.RowStyles.Add(new(SizeType.Absolute, 48));
+        layout.RowStyles.Add(new(SizeType.Absolute, dotOnly ? 310 : 365)); layout.RowStyles.Add(new(SizeType.AutoSize));
         layout.RowStyles.Add(new(SizeType.Percent, 100)); layout.RowStyles.Add(new(SizeType.Absolute, 35));
         Controls.Add(layout);
         layout.Controls.Add(new Label { Text = "GPTBot  /  运行管理", Font = new Font(Font.FontFamily, 23, FontStyle.Bold), AutoSize = true, ForeColor = Color.FromArgb(27, 46, 76) });
@@ -204,7 +209,7 @@ internal sealed class ManagerForm : Form
             rows.Controls.Add(backend, 5, i);
         }
         layout.Controls.Add(rows);
-        var logTools = new FlowLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(0, 8, 0, 0) };
+        var logTools = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, Padding = new Padding(0, 8, 0, 0) };
         filter.Items.Add("全部日志"); filter.Items.AddRange(services.Select(s => (object)s.Name).ToArray()); filter.SelectedIndex = 0;
         filter.SelectedIndexChanged += (_, _) => RepaintLog();
         logTools.Controls.Add(filter);
@@ -212,6 +217,7 @@ internal sealed class ManagerForm : Form
         logTools.Controls.Add(MakeButton("打开日志目录", () => { Process.Start(new ProcessStartInfo("explorer.exe", Quote(Path.Combine(root, "state"))) { UseShellExecute = true }); return Task.CompletedTask; }));
         layout.Controls.Add(logTools); layout.Controls.Add(log);
         layout.Controls.Add(new Label { Text = "关闭程序会停止由本程序启动的服务。外部实例仅显示状态；启动失败原因见下方日志。", AutoSize = true, ForeColor = Color.DimGray, Padding = new Padding(0, 8, 0, 0) });
+        ResumeLayout(true);
         snow.Log("使用目录：" + snowDir);
         if (!dotOnly) dsh.Log("使用启动器：" + dshCli);
         else bridge.Log("全部白名单会话使用 Dot 后端；DSH 已从启动流程撤下。");
